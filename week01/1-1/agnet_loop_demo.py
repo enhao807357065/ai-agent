@@ -6,8 +6,11 @@ import time
 import re
 
 from openai import OpenAI
+from dotenv import load_dotenv
 
 from sandbox_runner import run_python_in_sandbox
+
+load_dotenv()
 
 apikey = os.getenv("LLM_API_KEY")
 
@@ -79,7 +82,7 @@ def render(message: dict) -> str:
             parts.append(block["text"])
         elif block["type"] == "toolCall":
             parts.append(f"[toolCall] {block['name']}({json.dumps(block['arguments'], ensure_ascii=False)})")
-    print(f"render: {'\n'.join(parts)}")
+    print(f"origin_message: {message}, render: {'\n'.join(parts)}")
     return "\n".join(parts)
 
 def to_llm(messages: list[dict]) -> list[dict]:
