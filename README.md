@@ -46,7 +46,7 @@ conda create -n ai-agent python=3.12 -y
 conda activate ai-agent
 
 # 安装依赖
-pip install openai python-dotenv pydantic jinja2 fastapi uvicorn
+pip install -r requirements.txt
 
 # 配置 API Key
 cp .env.example .env
