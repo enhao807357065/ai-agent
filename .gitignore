@@ -1,9 +1,40 @@
+# IDE
 .idea/
+.vscode/
 .omc/
 .claude/
+
+# Python
 __pycache__/
 *.pyc
 *.pyo
-.env
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
 venv/
 .venv/
+env/
+
+# Environment variables
+.env
+
+# Logs
+*.log
+*.log.*
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+*.sql.bak
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
