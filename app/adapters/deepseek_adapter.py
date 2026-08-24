@@ -166,7 +166,6 @@ class DeepSeekAnthropicModel(StreamingModel):
             "model": self._model,
             "messages": anthropic_messages,
             "max_tokens": max_tokens,
-            "stream": True,
         }
 
         # 结构化输出时温度设低；否则用指定温度
