@@ -196,8 +196,26 @@ async def create_run(req: CreateRunRequest):
     # ---- 创建模型实例 & 启动 agent loop ----
     model = _create_model(model_name)
 
-    task = asyncio.create_task(
-        agent_loop(
+    if req.stream:
+        # 流式模式：后台启动 agent loop，客户端通过 SSE 订阅
+        task = asyncio.create_task(
+            agent_loop(
+                run_state=state,
+                model=model,
+                messages=state.messages,
+                tools=state.tools,
+                tool_executor=_demo_tool_executor if state.tools else None,
+                temperature=state.temperature,
+                max_turns=state.max_turns,
+                stream=True,
+            )
+        )
+        state.task = task
+
+        return {"run_id": run_id, "status": "created", "last_event_id": state._sequence}
+    else:
+        # 非流式模式：同步等待完整结果返回
+        await agent_loop(
             run_state=state,
             model=model,
             messages=state.messages,
@@ -205,11 +223,23 @@ async def create_run(req: CreateRunRequest):
             tool_executor=_demo_tool_executor if state.tools else None,
             temperature=state.temperature,
             max_turns=state.max_turns,
+            stream=False,
         )
-    )
-    state.task = task
 
-    return {"run_id": run_id, "status": "created", "last_event_id": state._sequence}
+        # 提取最后一条 assistant 消息作为响应
+        assistant_messages = [m for m in state.messages if m.get("role") == "assistant"]
+        last_assistant = assistant_messages[-1] if assistant_messages else {}
+
+        return {
+            "run_id": run_id,
+            "status": state.status.value,
+            "message": {
+                "role": "assistant",
+                "content": last_assistant.get("content", ""),
+                "tool_calls": last_assistant.get("tool_calls"),
+            },
+            "total_turns": state.total_turns,
+        }
 
 
 @router.get("/runs/{run_id}/stream")

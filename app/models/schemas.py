@@ -43,6 +43,7 @@ class CreateRunRequest(BaseModel):
     temperature: float = Field(default=0.7, ge=0.0, le=2.0, description="生成温度")
     max_turns: int = Field(default=10, ge=1, le=50, description="最大轮次（防无限循环）")
     system: str | None = Field(default=None, description="系统提示词（仅新建时生效）")
+    stream: bool = Field(default=True, description="是否流式输出（False 时同步等待完整结果返回）")
 
 
 # ============================================================

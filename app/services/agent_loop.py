@@ -103,6 +103,7 @@ async def agent_loop(
     tool_executor: ToolExecutor | None = None,
     temperature: float = 0.7,
     max_turns: int = 10,
+    stream: bool = True,
 ) -> None:
     """
     Agent Loop 主函数（增强版）
@@ -115,6 +116,7 @@ async def agent_loop(
         tool_executor: 工具执行回调（为 None 时不执行工具，直接返回）
         temperature: 生成温度
         max_turns: 最大循环轮次
+        stream: 是否流式调用模型（False 时使用 complete() 非流式调用）
     """
     from app.models.schemas import RunStatus
 
@@ -167,6 +169,7 @@ async def agent_loop(
                         temperature=temperature,
                         run_state=run_state,
                         turn=turn,
+                        stream=stream,
                     )
                 )
             except Exception as e:
@@ -401,9 +404,13 @@ async def _call_model_with_retry(
     temperature: float,
     run_state: RunState,
     turn: int,
+    stream: bool = True,
 ) -> tuple[list[str], list[ToolCallChunk], str, int, int]:
     """
     带重试机制的模型调用
+
+    Args:
+        stream: True 使用流式（逐 chunk 推事件），False 使用非流式（一次性返回）
 
     Returns:
         (text_parts, tool_calls, finish_reason, input_tokens, output_tokens)
@@ -422,23 +429,44 @@ async def _call_model_with_retry(
 
             call_start = time.time()
 
-            async for chunk in model.stream(
-                messages=messages,
-                tools=tools,
-                temperature=temperature,
-            ):
-                if isinstance(chunk, TextChunk):
-                    text_parts.append(chunk.content)
+            if stream:
+                # ---- 流式调用 ----
+                async for chunk in model.stream(
+                    messages=messages,
+                    tools=tools,
+                    temperature=temperature,
+                ):
+                    if isinstance(chunk, TextChunk):
+                        text_parts.append(chunk.content)
+                        run_state.append_event(EventType.TEXT_DELTA, {
+                            "content": chunk.content,
+                            "turn": turn,
+                        })
+                    elif isinstance(chunk, ToolCallChunk):
+                        tool_calls.append(chunk)
+                    elif isinstance(chunk, StreamDone):
+                        finish_reason = chunk.finish_reason
+                        input_tokens = chunk.input_tokens
+                        output_tokens = chunk.output_tokens
+            else:
+                # ---- 非流式调用 ----
+                from app.models.streaming import CompletionResult
+                result: CompletionResult = await model.complete(
+                    messages=messages,
+                    tools=tools,
+                    temperature=temperature,
+                )
+                if result.content:
+                    text_parts.append(result.content)
+                    # 非流式也发一个 text_delta 事件（完整内容一次性推送）
                     run_state.append_event(EventType.TEXT_DELTA, {
-                        "content": chunk.content,
+                        "content": result.content,
                         "turn": turn,
                     })
-                elif isinstance(chunk, ToolCallChunk):
-                    tool_calls.append(chunk)
-                elif isinstance(chunk, StreamDone):
-                    finish_reason = chunk.finish_reason
-                    input_tokens = chunk.input_tokens
-                    output_tokens = chunk.output_tokens
+                tool_calls = result.tool_calls
+                finish_reason = result.finish_reason
+                input_tokens = result.input_tokens
+                output_tokens = result.output_tokens
 
             call_duration = time.time() - call_start
 

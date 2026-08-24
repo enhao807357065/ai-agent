@@ -377,6 +377,11 @@
                     <input id="systemInput" type="text" value="你是一个有帮助的AI助手。" style="width:220px">
                     <label>Temperature:</label>
                     <input id="tempInput" type="number" value="0.7" min="0" max="2" step="0.1" style="width:60px">
+                    <label>Stream:</label>
+                    <select id="streamToggle" style="width:60px">
+                        <option value="true" selected>是</option>
+                        <option value="false">否</option>
+                    </select>
                 </div>
             </div>
         </div>
@@ -471,10 +476,12 @@
             appendMessage('user', text);
 
             // 构建请求
+            const useStream = document.getElementById('streamToggle').value === 'true';
             const body = {
                 messages: [{ role: 'user', content: text }],
                 model: document.getElementById('modelInput').value,
                 temperature: parseFloat(document.getElementById('tempInput').value),
+                stream: useStream,
             };
 
             if (currentRunId) {
@@ -502,7 +509,6 @@
 
                 const data = await resp.json();
                 currentRunId = data.run_id;
-                lastEventId = data.last_event_id;
 
                 // 添加到会话列表
                 if (!sessions.find(s => s.run_id === currentRunId)) {
@@ -514,8 +520,23 @@
                 }
                 updateSessionList();
 
-                // 2. 订阅 SSE
-                await subscribeSSE(currentRunId, lastEventId);
+                if (useStream) {
+                    // 流式模式：订阅 SSE
+                    lastEventId = data.last_event_id;
+                    await subscribeSSE(currentRunId, lastEventId);
+                } else {
+                    // 非流式模式：响应中直接包含完整结果
+                    if (data.message && data.message.content) {
+                        appendMessage('assistant', data.message.content);
+                    }
+                    if (data.message && data.message.tool_calls) {
+                        for (const tc of data.message.tool_calls) {
+                            const fn = tc.function || tc;
+                            appendMessage('tool', `🔧 调用工具: ${fn.name}(${fn.arguments || JSON.stringify(fn)})`);
+                        }
+                    }
+                    setStreaming(false);
+                }
 
             } catch (e) {
                 appendMessage('assistant', `❌ 网络错误: ${e.message}`);
