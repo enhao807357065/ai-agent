@@ -26,6 +26,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse, JSONResponse
 
 from app.core.config import settings
+from app.core.system_prompts import list_versions, get_version, get_default_version, render_prompt
 from app.models.events import EventType
 from app.models.schemas import (
     CreateRunRequest,
@@ -554,6 +555,54 @@ async def list_runs(limit: int = 20):
     # 按创建时间倒序，截取 limit
     result.sort(key=lambda r: r.created_at, reverse=True)
     return result[:limit]
+
+
+# ============================================================
+# System Prompt 版本管理
+# ============================================================
+
+@router.get("/system-prompts")
+async def get_system_prompts(tag: str | None = None):
+    """
+    获取可用的 System Prompt 版本列表
+
+    可选 tag 过滤：?tag=编程
+    """
+    versions = list_versions(tag=tag)
+    return {
+        "prompts": [v.to_dict() for v in versions],
+        "default_id": get_default_version().id,
+    }
+
+
+@router.get("/system-prompts/{prompt_id}")
+async def get_system_prompt(prompt_id: str):
+    """获取指定 ID 的 System Prompt 详情（含渲染预览）"""
+    version = get_version(prompt_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail=f"System prompt '{prompt_id}' not found")
+    # 返回元信息 + 渲染后的预览（用默认变量值渲染）
+    result = version.to_dict()
+    result["rendered_preview"] = render_prompt(prompt_id)
+    return result
+
+
+@router.post("/system-prompts/{prompt_id}/render")
+async def render_system_prompt(prompt_id: str, body: dict = {}):
+    """
+    动态渲染指定版本的 System Prompt
+
+    Body 中可传入模板变量：
+        {"user_name": "张三", "preferred_language": "Go", ...}
+    """
+    version = get_version(prompt_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail=f"System prompt '{prompt_id}' not found")
+    try:
+        rendered = render_prompt(prompt_id, **body)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Render error: {e}")
+    return {"prompt_id": prompt_id, "rendered": rendered}
 
 
 # ============================================================

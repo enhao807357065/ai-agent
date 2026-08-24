@@ -47,7 +47,7 @@ class ModelRateLimit:
     """单个模型的限流配置"""
     rpm: int = 60           # 每分钟最大请求数
     tpm: int = 100_000      # 每分钟最大 token 数
-    max_wait: float = 60.0  # 最大等待秒数，超时抛异常
+    max_wait: float = 5.0  # 最大等待秒数，超时抛异常
 
 
 class SlidingWindowLimiter:
@@ -61,7 +61,7 @@ class SlidingWindowLimiter:
         - cost > limit（单次超限）→ 直接放行并记录，避免死循环
     """
 
-    def __init__(self, limit: int, window_seconds: float = 5.0):
+    def __init__(self, limit: int, window_seconds: float = 60.0):
         self._limit = limit
         self._window = window_seconds
         self._records: deque[tuple[float, int]] = deque()

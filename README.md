@@ -2,6 +2,70 @@
 
 从零构建 AI Agent 的实践项目，覆盖 LLM 调用、Agent 循环、流式服务、结构化输出、持久化等核心能力。
 
+## 快速开始
+
+### 环境准备
+
+```bash
+# 克隆项目
+git clone https://github.com/enhao807357065/ai-agent.git
+cd ai-agent
+
+# 创建环境
+conda create -n ai-agent python=3.12 -y
+conda activate ai-agent
+
+# 安装依赖
+pip install -r requirements.txt
+
+# 配置环境变量
+cp .env.example .env
+# 编辑 .env 填入你的 API Key 和数据库配置（参考 .env.example 中的注释）
+```
+
+### 数据库初始化
+
+```bash
+# MySQL 8.0+，创建数据库
+mysql -u root -p -e "CREATE DATABASE ai_agent DEFAULT CHARSET utf8mb4 COLLATE utf8mb4_unicode_ci;"
+```
+
+### 启动服务
+
+```bash
+# 启动（自动建表）
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+# 验证服务启动成功
+curl -s http://localhost:8000/health
+# → {"status": "healthy", ...}
+```
+
+### 快速验证
+
+```bash
+BASE_URL=http://localhost:8000/v1
+
+# 非流式调用（最简单的验证方式）
+curl -s -X POST $BASE_URL/runs \
+  -H "Content-Type: application/json" \
+  -d '{
+    "messages": [{"role": "user", "content": "用一句话解释什么是Agent"}],
+    "stream": false
+  }' | python3 -m json.tool
+
+# 流式调用（两步：创建 → 订阅 SSE）
+RUN_ID=$(curl -s -X POST $BASE_URL/runs \
+  -H "Content-Type: application/json" \
+  -d '{"messages": [{"role": "user", "content": "hello"}]}' | python3 -c "import sys,json;print(json.load(sys.stdin)['run_id'])")
+
+curl -s -N "$BASE_URL/runs/$RUN_ID/stream?last_event_id=1"
+```
+
+> 更多 curl 示例请参考 [docs/curl-examples.md](docs/curl-examples.md)
+
+---
+
 ## 项目结构
 
 ```
@@ -11,9 +75,13 @@ ai-agent/
 │   ├── api/
 │   │   └── routes.py           # HTTP 路由（Run CRUD、SSE 订阅）
 │   ├── adapters/
-│   │   └── openai_adapter.py   # OpenAI Chat Completions 适配器
+│   │   ├── __init__.py         # Adapter 工厂（根据 LLM_PROVIDER 创建模型）
+│   │   ├── talai_adapter.py    # TAL AI 网关适配器（OpenAI Chat 兼容格式）
+│   │   ├── deepseek_adapter.py # DeepSeek Anthropic API 适配器
+│   │   └── deepseek_responses_adapter.py  # DeepSeek Responses API 适配器
 │   ├── core/
 │   │   ├── config.py           # 配置管理（环境变量 + .env）
+│   │   ├── system_prompts.py   # System Prompt 版本管理（Jinja2 模板）
 │   │   ├── database.py         # SQLAlchemy async engine & session
 │   │   └── logging_config.py   # structlog 结构化日志配置
 │   ├── models/
@@ -24,32 +92,23 @@ ai-agent/
 │   └── services/
 │       ├── agent_loop.py       # Agent Loop 核心引擎（重试、日志、checkpoint）
 │       ├── db_service.py       # 数据库持久化 CRUD
+│       ├── rate_limiter.py     # 滑动窗口限流器（RPM/TPM）
 │       └── run_store.py        # 内存运行时状态管理（SSE 事件流）
 ├── week01/                     # 第一周：Agent 基础能力
 │   ├── chat_responses.py       # OpenAI Chat/Responses API 基础调用
 │   ├── 1-1/                    # Agent Loop 基础
-│   │   ├── agnet_loop_demo.py  # 完整 Agent 循环（工具调用 + 沙箱执行）
-│   │   └── sandbox_runner.py   # 代码沙箱运行器
 │   ├── 1-2/                    # 模型适配器 + Mini Agent
-│   │   ├── model_adapter.py    # 抽象基类（ModelAdapter）
-│   │   ├── ds_adapter.py       # DeepSeek 适配器实现
-│   │   ├── openai_adapter.py   # OpenAI Responses API 适配器
-│   │   ├── py_pydantic.py      # Pydantic 结构化输出定义
-│   │   ├── mini_loop.py        # 精简版 Agent Loop
-│   │   └── temp_and_topp.py    # Temperature 与 Top-P 采样实验
 │   ├── 1-3/                    # 流式服务（SSE）
-│   │   ├── streaming.py        # FastAPI SSE 服务端（断开/重连/缓存）
-│   │   └── index.html          # 前端页面（EventSource 断开重连演示）
 │   ├── 1-4/                    # Prompt 模板引擎
-│   │   └── type_render.py      # Jinja2 模板渲染 + 指纹校验
 │   └── 1-5/                    # 结构化输出与字段校验
-│       ├── field_rule.py       # Pydantic model_validator 字段规则
-│       └── openai_responses_parse.py  # responses.parse 结构化输出实践
-├── .env                        # 环境变量（不入库）
-├── .env.example                # 环境变量示例
+├── docs/
+│   └── curl-examples.md        # 完整 API curl 请求示例
+├── .env.example                # 环境变量模板
 ├── requirements.txt            # Python 依赖
 └── .gitignore
 ```
+
+---
 
 ## 架构设计
 
@@ -89,7 +148,9 @@ Agent Loop（每轮 Turn）:
 - **读取策略**：内存优先，fallback DB
 - **设计原则**：不使用数据库外键约束，关联关系仅在 ORM 层声明
 
-### API 接口
+---
+
+## API 接口
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -101,43 +162,28 @@ Agent Loop（每轮 Turn）:
 | POST | `/v1/runs/{id}/cancel` | 取消 Run |
 | POST | `/v1/runs/{id}/resume` | 从 DB 恢复并继续执行 |
 | GET | `/v1/runs` | 列出最近的 Run |
+| GET | `/v1/system-prompts` | 获取 System Prompt 版本列表 |
+| GET | `/v1/system-prompts/{id}` | 获取指定 Prompt 详情 |
+| POST | `/v1/system-prompts/{id}/render` | Jinja2 渲染指定 Prompt |
+| GET | `/v1/rate-limits` | 查询限流状态 |
 | GET | `/health` | 健康检查 |
 
-## 环境要求
+---
 
-- Python 3.12+
-- MySQL 8.0+
-- Conda 环境：`ai-agent`
+## 配置说明
 
-## 快速开始
+通过 `.env` 文件配置，支持 3 种 LLM Provider 切换：
 
 ```bash
-# 克隆项目
-git clone https://github.com/enhao807357065/ai-agent.git
-cd ai-agent
-
-# 创建环境
-conda create -n ai-agent python=3.12 -y
-conda activate ai-agent
-
-# 安装依赖
-pip install -r requirements.txt
-
-# 配置环境变量
-cp .env.example .env
-# 编辑 .env 填入你的配置
-
-# 创建数据库
-mysql -u root -p -e "CREATE DATABASE ai_agent DEFAULT CHARSET utf8mb4 COLLATE utf8mb4_unicode_ci;"
-
-# 启动服务（自动建表）
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-
-# 测试
-curl -X POST http://localhost:8000/v1/runs \
-  -H "Content-Type: application/json" \
-  -d '{"messages": [{"role": "user", "content": "hello"}]}'
+# Provider 选择（三选一）
+LLM_PROVIDER=talai              # TAL AI 网关（OpenAI Chat 兼容）
+LLM_PROVIDER=deepseek           # DeepSeek Anthropic API
+LLM_PROVIDER=deepseek_responses # DeepSeek Responses API
 ```
+
+详细配置项参考 [.env.example](.env.example)。
+
+---
 
 ## 各模块说明
 
@@ -148,6 +194,8 @@ curl -X POST http://localhost:8000/v1/runs \
 - **SSE 流式输出**：实时推送 text delta、工具调用、执行结果
 - **断点恢复**：服务重启后从 MySQL checkpoint 恢复 Run 继续执行
 - **多轮对话**：同一 run_id 可追加消息，保持上下文
+- **限流保护**：滑动窗口 RPM/TPM 限流，超限返回 429
+- **System Prompt 管理**：Jinja2 模板引擎，支持变量注入和版本切换
 
 ### week01/ — Agent 基础能力
 
@@ -159,17 +207,20 @@ curl -X POST http://localhost:8000/v1/runs \
 | 1-4 | Jinja2 Prompt 模板：StrictUndefined + SHA256 指纹 |
 | 1-5 | Pydantic model_validator 字段约束 + responses.parse |
 
+---
+
 ## 技术栈
 
 | 组件 | 选型 |
 |------|------|
-| LLM | DeepSeek V4 (via OpenAI 兼容网关) |
-| SDK | OpenAI Python SDK |
+| LLM | DeepSeek V4 (via OpenAI 兼容网关 / Anthropic API / Responses API) |
+| SDK | OpenAI Python SDK + Anthropic Python SDK |
 | Web 框架 | FastAPI + Uvicorn |
 | 数据库 | MySQL 8.0 + SQLAlchemy 2.0 (async) |
 | DB 驱动 | aiomysql |
 | 结构化输出 | Pydantic V2 |
 | 日志 | structlog (JSON) |
+| 限流 | 滑动窗口（内存实现，RPM/TPM 双维度） |
 | 重试 | tenacity |
 | 模板引擎 | Jinja2 |
 | 运行时 | Python 3.12 / asyncio |

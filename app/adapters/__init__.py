@@ -11,8 +11,9 @@ def create_model(model_name: str | None = None) -> StreamingModel:
     根据配置创建 StreamingModel 实例
 
     LLM_PROVIDER:
-        - "talai"    → TAL AI 网关（OpenAI 兼容格式）
-        - "deepseek" → DeepSeek 原厂 Anthropic API 格式
+        - "talai"              → TAL AI 网关（OpenAI 兼容格式）
+        - "deepseek"           → DeepSeek 原厂 Anthropic API 格式
+        - "deepseek_responses" → DeepSeek 原厂 Responses API 格式
     """
     provider = settings.LLM_PROVIDER
     model = model_name or settings.LLM_MODEL
@@ -26,6 +27,14 @@ def create_model(model_name: str | None = None) -> StreamingModel:
             enable_thinking=settings.DEEPSEEK_ENABLE_THINKING,
             thinking_budget_tokens=settings.DEEPSEEK_THINKING_BUDGET,
         )
+    elif provider == "deepseek_responses":
+        from app.adapters.deepseek_responses_adapter import DeepSeekResponsesModel
+        return DeepSeekResponsesModel(
+            api_key=settings.DEEPSEEK_API_KEY,
+            base_url=settings.DEEPSEEK_RESPONSES_BASE_URL,
+            model=model or settings.DEEPSEEK_MODEL,
+            reasoning_effort=settings.DEEPSEEK_REASONING_EFFORT or None,
+        )
     elif provider == "talai":
         from app.adapters.talai_adapter import TalAIStreamingModel
         return TalAIStreamingModel(
@@ -37,5 +46,5 @@ def create_model(model_name: str | None = None) -> StreamingModel:
     else:
         raise ValueError(
             f"Unknown LLM_PROVIDER: '{provider}'. "
-            f"Supported: 'talai', 'deepseek'"
+            f"Supported: 'talai', 'deepseek', 'deepseek_responses'"
         )

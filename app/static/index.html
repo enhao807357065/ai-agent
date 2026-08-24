@@ -373,8 +373,11 @@
                 <div class="settings-bar">
                     <label>模型:</label>
                     <input id="modelInput" type="text" value="deepseek-v4-pro" style="width:140px">
-                    <label>System:</label>
-                    <input id="systemInput" type="text" value="你是一个有帮助的AI助手。" style="width:220px">
+                    <label>System Prompt:</label>
+                    <select id="systemSelect" style="width:180px" onchange="onSystemPromptChange()">
+                        <option value="">加载中...</option>
+                    </select>
+                    <span id="systemDesc" style="font-size:11px; color:var(--text-muted); max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;"></span>
                     <label>Temperature:</label>
                     <input id="tempInput" type="number" value="0.7" min="0" max="2" step="0.1" style="width:60px">
                     <label>Stream:</label>
@@ -398,6 +401,9 @@
         let isStreaming = false;
         let abortController = null;
         let sessions = []; // [{run_id, title, created_at}]
+        let systemPrompts = []; // [{id, name, description, variables, tags}]
+        let currentSystemPrompt = ''; // 当前选中的渲染后 prompt content
+        let currentPromptId = ''; // 当前选中的 prompt id
 
         // ============================================================
         // Session Management
@@ -487,7 +493,7 @@
             if (currentRunId) {
                 body.run_id = currentRunId;
             } else {
-                body.system = document.getElementById('systemInput').value;
+                body.system = currentSystemPrompt;
             }
 
             setStreaming(true);
@@ -739,23 +745,89 @@
         }
 
         // ============================================================
-        // Init: load existing sessions
+        // Init: load existing sessions + system prompts
         // ============================================================
-        async function init() {
+        async function loadSystemPrompts() {
             try {
-                const resp = await fetch(`${API_BASE}/runs?limit=20`);
+                const resp = await fetch(`${API_BASE}/system-prompts`);
+                if (!resp.ok) return;
+                const data = await resp.json();
+                systemPrompts = data.prompts;
+                const defaultId = data.default_id;
+
+                const select = document.getElementById('systemSelect');
+                select.innerHTML = systemPrompts.map(p =>
+                    `<option value="${p.id}" ${p.id === defaultId ? 'selected' : ''}>${p.name}</option>`
+                ).join('');
+
+                // 设置初始值 — 通过后端 Jinja2 渲染获取实际 prompt
+                currentPromptId = defaultId;
+                const defaultPrompt = systemPrompts.find(p => p.id === defaultId) || systemPrompts[0];
+                if (defaultPrompt) {
+                    document.getElementById('systemDesc').textContent = defaultPrompt.description;
+                    document.getElementById('systemDesc').title = `变量: ${defaultPrompt.variables.join(', ')}`;
+                }
+                // 调用后端渲染接口获取 rendered prompt
+                await renderCurrentPrompt();
+            } catch (e) {
+                console.error('Failed to load system prompts:', e);
+                // fallback
+                const select = document.getElementById('systemSelect');
+                select.innerHTML = '<option value="">默认助手</option>';
+                currentSystemPrompt = '你是一个有帮助的AI助手。';
+            }
+        }
+
+        async function renderCurrentPrompt() {
+            // 调用后端 Jinja2 渲染接口
+            try {
+                const resp = await fetch(`${API_BASE}/system-prompts/${currentPromptId}/render`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),  // 可传入自定义变量
+                });
                 if (resp.ok) {
-                    const runs = await resp.json();
-                    sessions = runs.map(r => ({
-                        run_id: r.run_id,
-                        title: r.run_id.slice(0, 8) + '...',
-                        created_at: r.created_at,
-                    }));
-                    updateSessionList();
+                    const data = await resp.json();
+                    currentSystemPrompt = data.rendered;
                 }
             } catch (e) {
-                // server not running yet, that's fine
+                console.error('Failed to render prompt:', e);
             }
+        }
+
+        async function onSystemPromptChange() {
+            const select = document.getElementById('systemSelect');
+            currentPromptId = select.value;
+            const prompt = systemPrompts.find(p => p.id === currentPromptId);
+            if (prompt) {
+                document.getElementById('systemDesc').textContent = prompt.description;
+                document.getElementById('systemDesc').title = `变量: ${prompt.variables.join(', ')}`;
+            }
+            // 重新渲染
+            await renderCurrentPrompt();
+        }
+
+        async function init() {
+            // 并行加载 sessions 和 system prompts
+            await Promise.all([
+                loadSystemPrompts(),
+                (async () => {
+                    try {
+                        const resp = await fetch(`${API_BASE}/runs?limit=20`);
+                        if (resp.ok) {
+                            const runs = await resp.json();
+                            sessions = runs.map(r => ({
+                                run_id: r.run_id,
+                                title: r.run_id.slice(0, 8) + '...',
+                                created_at: r.created_at,
+                            }));
+                            updateSessionList();
+                        }
+                    } catch (e) {
+                        // server not running yet, that's fine
+                    }
+                })(),
+            ]);
         }
 
         init();
