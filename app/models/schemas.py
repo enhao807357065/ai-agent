@@ -56,6 +56,7 @@ class RunStatus(str, Enum):
     IN_PROGRESS = "in_progress"
     COMPLETED = "completed"
     FAILED = "failed"
+    RATE_LIMITED = "rate_limited"
     CANCELLED = "cancelled"
 
 

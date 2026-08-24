@@ -23,7 +23,7 @@ from typing import AsyncGenerator
 
 import structlog
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 
 from app.core.config import settings
 from app.models.events import EventType
@@ -36,6 +36,7 @@ from app.models.schemas import (
 from app.services.run_store import run_store, RunState
 from app.services.agent_loop import agent_loop
 from app.services.db_service import db_service
+from app.services.rate_limiter import RateLimitExceeded
 from app.adapters import create_model
 
 logger = structlog.get_logger(__name__)
@@ -225,6 +226,17 @@ async def create_run(req: CreateRunRequest):
             max_turns=state.max_turns,
             stream=False,
         )
+
+        # 限流 → 返回 HTTP 429
+        if state.status.value == "rate_limited":
+            return JSONResponse(
+                status_code=429,
+                content={
+                    "run_id": run_id,
+                    "status": "rate_limited",
+                    "error": state.error or "Rate limit exceeded",
+                },
+            )
 
         # 提取最后一条 assistant 消息作为响应
         assistant_messages = [m for m in state.messages if m.get("role") == "assistant"]

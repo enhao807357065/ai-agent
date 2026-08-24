@@ -173,6 +173,27 @@ async def agent_loop(
                         stream=stream,
                     )
                 )
+            except RateLimitExceeded as e:
+                # 限流超时 — 标记为 rate_limited，区别于普通失败
+                error_msg = f"Rate limited: {e}"
+                logger.warning(
+                    "agent_loop.rate_limited",
+                    run_id=run_id,
+                    turn=turn,
+                    model=e.model_key,
+                    dimension=e.dimension,
+                    usage=e.usage,
+                    limit=e.limit,
+                )
+                run_state.mark_rate_limited(error_msg)
+                run_state.append_event(EventType.RUN_FAILED, {
+                    "error": error_msg,
+                    "error_type": "rate_limited",
+                    "model": e.model_key,
+                    "dimension": e.dimension,
+                })
+                await db_service.update_run_status(run_id, "rate_limited", total_turns=turn, error=error_msg)
+                return
             except Exception as e:
                 # 所有重试耗尽后仍然失败
                 error_msg = f"LLM call failed after {settings.LLM_MAX_RETRIES} retries: {type(e).__name__}: {e}"
@@ -528,6 +549,10 @@ async def _call_model_with_retry(
                 await asyncio.sleep(wait_time)
             else:
                 raise
+
+        except RateLimitExceeded:
+            # 我方限流器超时，不重试直接向上抛
+            raise
 
         except Exception as e:
             # 不可重试的异常直接抛出

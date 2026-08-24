@@ -613,7 +613,12 @@
                                     if (assistantBubble) {
                                         assistantBubble.querySelector('.bubble').classList.remove('streaming-cursor');
                                     }
-                                    appendMessage('assistant', `❌ 执行失败: ${event.data.error || '未知错误'}`);
+                                    const errorType = event.data.error_type;
+                                    if (errorType === 'rate_limited') {
+                                        appendMessage('assistant', `⏳ 请求过于频繁，请稍后再试: ${event.data.error || '限流'}`);
+                                    } else {
+                                        appendMessage('assistant', `❌ 执行失败: ${event.data.error || '未知错误'}`);
+                                    }
                                     setStreaming(false);
                                     return;
 

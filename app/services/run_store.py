@@ -80,6 +80,11 @@ class RunState:
         self.completed_at = time.time()
         self.error = error
 
+    def mark_rate_limited(self, error: str):
+        self.status = RunStatus.RATE_LIMITED
+        self.completed_at = time.time()
+        self.error = error
+
     def mark_cancelled(self):
         self.status = RunStatus.CANCELLED
         self.completed_at = time.time()
@@ -87,7 +92,7 @@ class RunState:
     @property
     def is_terminal(self) -> bool:
         """Run 是否已结束（不会再产生新事件）"""
-        return self.status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED)
+        return self.status in (RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.RATE_LIMITED, RunStatus.CANCELLED)
 
 
 class RunStore:

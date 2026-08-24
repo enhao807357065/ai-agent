@@ -61,7 +61,7 @@ class SlidingWindowLimiter:
         - cost > limit（单次超限）→ 直接放行并记录，避免死循环
     """
 
-    def __init__(self, limit: int, window_seconds: float = 60.0):
+    def __init__(self, limit: int, window_seconds: float = 5.0):
         self._limit = limit
         self._window = window_seconds
         self._records: deque[tuple[float, int]] = deque()
@@ -91,7 +91,7 @@ class SlidingWindowLimiter:
         now = time.monotonic()
         self._records.append((now, cost))
 
-    async def acquire(self, cost: int = 1, max_wait: float = 60.0) -> float:
+    async def acquire(self, cost: int = 1, max_wait: float = 5.0) -> float:
         """
         获取配额。
 
