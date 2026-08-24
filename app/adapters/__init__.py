@@ -21,7 +21,8 @@ def create_model(model_name: str | None = None) -> StreamingModel:
         from app.adapters.deepseek_adapter import DeepSeekAnthropicModel
         return DeepSeekAnthropicModel(
             api_key=settings.DEEPSEEK_API_KEY,
-            model=model,
+            base_url=settings.DEEPSEEK_BASE_URL,
+            model=model or settings.DEEPSEEK_MODEL,
             enable_thinking=settings.DEEPSEEK_ENABLE_THINKING,
             thinking_budget_tokens=settings.DEEPSEEK_THINKING_BUDGET,
         )

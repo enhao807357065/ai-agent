@@ -26,6 +26,8 @@ class Settings:
 
     # DeepSeek 原厂配置（LLM_PROVIDER=deepseek 时使用，走 Anthropic API 格式）
     DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
+    DEEPSEEK_BASE_URL: str = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/anthropic")
+    DEEPSEEK_MODEL: str = os.getenv("DEEPSEEK_MODEL", "deepseek-reasoner")
     DEEPSEEK_ENABLE_THINKING: bool = os.getenv("DEEPSEEK_ENABLE_THINKING", "false").lower() == "true"
     DEEPSEEK_THINKING_BUDGET: int = int(os.getenv("DEEPSEEK_THINKING_BUDGET", "10000"))
     DEEPSEEK_REASONING_EFFORT: str = os.getenv("DEEPSEEK_REASONING_EFFORT", "medium")

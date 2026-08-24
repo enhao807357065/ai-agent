@@ -26,12 +26,11 @@ from app.models.streaming import (
 class DeepSeekAnthropicModel(StreamingModel):
     """DeepSeek Anthropic API 格式流式模型"""
 
-    BASE_URL = "https://api.deepseek.com/anthropic"
-
     def __init__(
         self,
         api_key: str,
-        model: str = "deepseek-v4-pro",
+        base_url: str = "https://api.deepseek.com/anthropic",
+        model: str = "deepseek-reasoner",
         enable_thinking: bool = False,
         thinking_budget_tokens: int = 10000,
     ):
@@ -40,7 +39,7 @@ class DeepSeekAnthropicModel(StreamingModel):
         self._thinking_budget_tokens = thinking_budget_tokens
         self._client = AsyncAnthropic(
             api_key=api_key,
-            base_url=self.BASE_URL,
+            base_url=base_url,
             timeout=120.0,
             max_retries=1,
         )
