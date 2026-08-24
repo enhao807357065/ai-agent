@@ -36,7 +36,7 @@ from app.models.schemas import (
 from app.services.run_store import run_store, RunState
 from app.services.agent_loop import agent_loop
 from app.services.db_service import db_service
-from app.adapters.openai_adapter import OpenAIStreamingModel
+from app.adapters import create_model
 
 logger = structlog.get_logger(__name__)
 
@@ -44,17 +44,12 @@ router = APIRouter(prefix="/v1")
 
 
 # ============================================================
-# 模型工厂（根据配置创建 StreamingModel）
+# 模型工厂（委托给 adapters 包的 create_model）
 # ============================================================
 
-def _create_model(model_name: str | None = None) -> OpenAIStreamingModel:
-    """创建模型实例"""
-    return OpenAIStreamingModel(
-        api_key=settings.LLM_API_KEY,
-        base_url=settings.LLM_BASE_URL,
-        model=model_name or settings.LLM_MODEL,
-        extra_body={"thinking": {"type": "disabled"}},
-    )
+def _create_model(model_name: str | None = None):
+    """创建模型实例（根据 LLM_PROVIDER 环境变量自动选择 adapter）"""
+    return create_model(model_name)
 
 
 # ============================================================

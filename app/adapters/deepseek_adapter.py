@@ -1,8 +1,7 @@
 """
-OpenAI 兼容的 StreamingModel 实现
+DeepSeek 原厂 API 的 StreamingModel 实现
 
-支持所有 OpenAI API 兼容的服务（OpenAI、DeepSeek、TAL Gateway 等）。
-通过配置 base_url 和 model 即可切换。
+直连 https://api.deepseek.com，支持 thinking 模式等原厂特性。
 """
 
 from __future__ import annotations
@@ -15,22 +14,25 @@ from openai import AsyncOpenAI
 from app.models.streaming import StreamingModel, TextChunk, ToolCallChunk, StreamDone, StreamChunk
 
 
-class OpenAIStreamingModel(StreamingModel):
-    """OpenAI 兼容 API 的流式模型实现"""
+class DeepSeekStreamingModel(StreamingModel):
+    """DeepSeek 原厂 API 流式模型"""
+
+    BASE_URL = "https://api.deepseek.com"
 
     def __init__(
         self,
         api_key: str,
-        base_url: str,
-        model: str,
-        extra_body: dict[str, Any] | None = None,
+        model: str = "deepseek-v4-pro",
+        enable_thinking: bool = False,
+        reasoning_effort: str = "medium",
     ):
         self._model = model
-        self._extra_body = extra_body or {}
+        self._enable_thinking = enable_thinking
+        self._reasoning_effort = reasoning_effort
         self._client = AsyncOpenAI(
             api_key=api_key,
-            base_url=base_url,
-            timeout=60.0,
+            base_url=self.BASE_URL,
+            timeout=120.0,  # 思考模式可能较慢
             max_retries=1,
         )
 
@@ -45,7 +47,7 @@ class OpenAIStreamingModel(StreamingModel):
         temperature: float = 0.7,
         max_tokens: int = 4096,
     ) -> AsyncIterator[StreamChunk]:
-        """调用 OpenAI 兼容 API 的流式接口"""
+        """调用 DeepSeek 原厂流式接口"""
 
         kwargs: dict[str, Any] = {
             "model": self._model,
@@ -59,12 +61,16 @@ class OpenAIStreamingModel(StreamingModel):
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
 
-        if self._extra_body:
-            kwargs["extra_body"] = self._extra_body
+        # DeepSeek 原厂特性：思考模式
+        if self._enable_thinking:
+            kwargs["extra_body"] = {
+                "thinking": {"type": "enabled"},
+                "reasoning_effort": self._reasoning_effort,
+            }
 
         stream = await self._client.chat.completions.create(**kwargs)
 
-        # 收集工具调用片段（OpenAI 流式 tool_calls 是分片到达的）
+        # 收集工具调用片段（流式 tool_calls 分片到达）
         tool_call_buffers: dict[int, dict] = {}
         input_tokens = 0
         output_tokens = 0
@@ -72,7 +78,7 @@ class OpenAIStreamingModel(StreamingModel):
 
         async for chunk in stream:
             if not chunk.choices:
-                # usage chunk (某些 API 会在最后发一个带 usage 的空 choices)
+                # usage chunk（最后一个带 usage 的空 choices）
                 if chunk.usage:
                     input_tokens = chunk.usage.prompt_tokens or 0
                     output_tokens = chunk.usage.completion_tokens or 0

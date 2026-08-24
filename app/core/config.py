@@ -16,10 +16,18 @@ load_dotenv(dotenv_path=_project_root / ".env")
 class Settings:
     """集中管理配置项"""
 
-    # LLM 配置
+    # Provider 选择: talai | deepseek
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "talai")
+
+    # TAL AI 网关配置（LLM_PROVIDER=talai 时使用）
     LLM_API_KEY: str = os.getenv("LLM_API_KEY", "")
     LLM_BASE_URL: str = os.getenv("LLM_BASE_URL", "http://ai-service.tal.com/openai-compatible/v1")
     LLM_MODEL: str = os.getenv("LLM_MODEL", "deepseek-v4-pro")
+
+    # DeepSeek 原厂配置（LLM_PROVIDER=deepseek 时使用）
+    DEEPSEEK_API_KEY: str = os.getenv("DEEPSEEK_API_KEY", "")
+    DEEPSEEK_ENABLE_THINKING: bool = os.getenv("DEEPSEEK_ENABLE_THINKING", "false").lower() == "true"
+    DEEPSEEK_REASONING_EFFORT: str = os.getenv("DEEPSEEK_REASONING_EFFORT", "medium")
 
     # 服务配置
     HOST: str = os.getenv("APP_HOST", "0.0.0.0")
