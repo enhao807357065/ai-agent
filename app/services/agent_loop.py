@@ -161,7 +161,7 @@ async def agent_loop(
             output_tokens = 0
 
             try:
-                text_parts, tool_calls, finish_reason, input_tokens, output_tokens = (
+                text_parts, tool_calls, finish_reason, input_tokens, output_tokens, ttft_ms = (
                     await _call_model_with_retry(
                         model=model,
                         messages=messages,
@@ -200,6 +200,7 @@ async def agent_loop(
                 finish_reason=finish_reason,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
+                ttft_ms=ttft_ms,
                 duration_ms=round(turn_duration * 1000),
             )
 
@@ -405,7 +406,7 @@ async def _call_model_with_retry(
     run_state: RunState,
     turn: int,
     stream: bool = True,
-) -> tuple[list[str], list[ToolCallChunk], str, int, int]:
+) -> tuple[list[str], list[ToolCallChunk], str, int, int, int | None]:
     """
     带重试机制的模型调用
 
@@ -413,7 +414,8 @@ async def _call_model_with_retry(
         stream: True 使用流式（逐 chunk 推事件），False 使用非流式（一次性返回）
 
     Returns:
-        (text_parts, tool_calls, finish_reason, input_tokens, output_tokens)
+        (text_parts, tool_calls, finish_reason, input_tokens, output_tokens, ttft_ms)
+        ttft_ms: 首 token 延迟（毫秒），仅流式模式有值，非流式为 None
     """
     attempt = 0
     last_exception = None
@@ -428,6 +430,7 @@ async def _call_model_with_retry(
             output_tokens = 0
 
             call_start = time.time()
+            first_token_time: float | None = None
 
             if stream:
                 # ---- 流式调用 ----
@@ -437,12 +440,16 @@ async def _call_model_with_retry(
                     temperature=temperature,
                 ):
                     if isinstance(chunk, TextChunk):
+                        if first_token_time is None:
+                            first_token_time = time.time()
                         text_parts.append(chunk.content)
                         run_state.append_event(EventType.TEXT_DELTA, {
                             "content": chunk.content,
                             "turn": turn,
                         })
                     elif isinstance(chunk, ToolCallChunk):
+                        if first_token_time is None:
+                            first_token_time = time.time()
                         tool_calls.append(chunk)
                     elif isinstance(chunk, StreamDone):
                         finish_reason = chunk.finish_reason
@@ -469,18 +476,21 @@ async def _call_model_with_retry(
                 output_tokens = result.output_tokens
 
             call_duration = time.time() - call_start
+            ttft_ms = round((first_token_time - call_start) * 1000) if first_token_time else None
 
             logger.debug(
                 "agent_loop.llm_call_success",
                 run_id=run_state.run_id,
                 turn=turn,
                 attempt=attempt,
+                stream=stream,
                 duration_ms=round(call_duration * 1000),
+                ttft_ms=ttft_ms,
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
             )
 
-            return text_parts, tool_calls, finish_reason, input_tokens, output_tokens
+            return text_parts, tool_calls, finish_reason, input_tokens, output_tokens, ttft_ms
 
         except RETRIABLE_EXCEPTIONS as e:
             last_exception = e
