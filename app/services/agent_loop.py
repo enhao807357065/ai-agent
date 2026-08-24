@@ -426,7 +426,14 @@ async def _call_model_with_retry(
         attempt += 1
         try:
             # ---- 限流：请求前获取 RPM 配额 ----
-            await rate_limiter.acquire_request(model_key)
+            waited = await rate_limiter.acquire_request(model_key)
+            if waited > 0:
+                logger.info(
+                    "agent_loop.rate_limit_waited",
+                    run_id=run_state.run_id,
+                    model=model_key,
+                    waited_ms=round(waited * 1000),
+                )
 
             text_parts: list[str] = []
             tool_calls: list[ToolCallChunk] = []

@@ -80,7 +80,11 @@ def create_app() -> FastAPI:
         rate_limits = _json.loads(settings.MODEL_RATE_LIMITS)
         for model_key, cfg in rate_limits.items():
             rate_limiter.configure(model_key, ModelRateLimit(**cfg))
-        structlog.get_logger().info("rate_limiter.initialized", models=list(rate_limits.keys()))
+        structlog.get_logger().info(
+            "rate_limiter.initialized",
+            models=list(rate_limits.keys()),
+            configs={k: {"rpm": v.get("rpm", 60), "tpm": v.get("tpm", 100000), "max_wait": v.get("max_wait", 60.0)} for k, v in rate_limits.items()},
+        )
 
     # 后台清理任务
     @app.on_event("startup")
