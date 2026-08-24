@@ -7,8 +7,11 @@ FastAPI 应用入口
 """
 
 import asyncio
+import time
+import uuid
 
-from fastapi import FastAPI
+import structlog
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -37,7 +40,56 @@ def create_app() -> FastAPI:
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=["X-Trace-Id"],
     )
+
+    @app.middleware("http")
+    async def trace_request(request: Request, call_next):
+        """为每个 HTTP 请求绑定 trace_id，使日志可按请求链路关联。"""
+        trace_id = (
+            request.headers.get("X-Trace-Id")
+            or request.headers.get("X-Request-Id")
+            or uuid.uuid4().hex
+        )
+        started_at = time.perf_counter()
+        logger = structlog.get_logger(__name__)
+
+        # request.state 供路由或下游 HTTP 调用读取并透传。
+        request.state.trace_id = trace_id
+        structlog.contextvars.clear_contextvars()
+        structlog.contextvars.bind_contextvars(trace_id=trace_id)
+
+        logger.info(
+            "http.request_received",
+            method=request.method,
+            path=request.url.path,
+            query=str(request.url.query) or None,
+            client_host=request.client.host if request.client else None,
+        )
+
+        try:
+            response = await call_next(request)
+            duration_ms = round((time.perf_counter() - started_at) * 1000)
+            response.headers["X-Trace-Id"] = trace_id
+            logger.info(
+                "http.request_completed",
+                method=request.method,
+                path=request.url.path,
+                status_code=response.status_code,
+                duration_ms=duration_ms,
+            )
+            return response
+        except Exception:
+            duration_ms = round((time.perf_counter() - started_at) * 1000)
+            logger.exception(
+                "http.request_failed",
+                method=request.method,
+                path=request.url.path,
+                duration_ms=duration_ms,
+            )
+            raise
+        finally:
+            structlog.contextvars.clear_contextvars()
 
     # 注册路由
     app.include_router(router)
