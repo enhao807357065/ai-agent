@@ -167,11 +167,11 @@ class DeepSeekAnthropicModel(StreamingModel):
             "max_tokens": max_tokens,
         }
 
-        # 结构化输出时温度设低；否则用指定温度
+        # temperature 不在 Anthropic SDK stream() 签名中，通过 extra_body 传入
         if response_format and response_format.get("type") in ("json_object", "json_schema"):
-            kwargs["temperature"] = min(temperature, 0.3)
+            kwargs["extra_body"] = {"temperature": min(temperature, 0.3)}
         else:
-            kwargs["temperature"] = temperature
+            kwargs["extra_body"] = {"temperature": temperature}
 
         if system_prompt:
             kwargs["system"] = system_prompt
@@ -294,11 +294,11 @@ class DeepSeekAnthropicModel(StreamingModel):
             "max_tokens": max_tokens,
         }
 
-        # 结构化输出时温度设低
+        # temperature 不在 Anthropic SDK create() 签名中，通过 extra_body 传入
         if response_format and response_format.get("type") in ("json_object", "json_schema"):
-            kwargs["temperature"] = min(temperature, 0.3)
+            kwargs["extra_body"] = {"temperature": min(temperature, 0.3)}
         else:
-            kwargs["temperature"] = temperature
+            kwargs["extra_body"] = {"temperature": temperature}
 
         if system_prompt:
             kwargs["system"] = system_prompt
