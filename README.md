@@ -43,6 +43,8 @@ curl -s http://localhost:8000/health
 
 ### 快速验证
 
+**命令行验证：**
+
 ```bash
 BASE_URL=http://localhost:8000/v1
 
@@ -61,6 +63,13 @@ RUN_ID=$(curl -s -X POST $BASE_URL/runs \
 
 curl -s -N "$BASE_URL/runs/$RUN_ID/stream?last_event_id=1"
 ```
+
+**网页端验证：**
+
+浏览器打开 http://localhost:8000 即可进入 Web UI，支持：
+- 实时流式对话（逐字输出）
+- 底部 Settings 栏切换 System Prompt 版本（通用助手 / 编程助手 / Agent 架构师）
+- 多轮会话管理（左侧 Session 列表）
 
 > 更多 curl 示例请参考 [docs/curl-examples.md](docs/curl-examples.md)
 
