@@ -28,6 +28,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 | GET | `/v1/runs/{run_id}` | 获取 Run 状态详情 |
 | GET | `/v1/runs/{run_id}/messages` | 获取完整对话历史 |
 | GET | `/v1/runs` | 列出最近的 Run |
+| GET | `/v1/rate-limits` | 查看所有模型限流状态 |
+| GET | `/v1/rate-limits/{model_key}` | 查看指定模型限流状态 |
 | GET | `/health` | 健康检查 |
 
 ---
@@ -312,10 +314,96 @@ curl -N http://localhost:8000/v1/runs/{run_id}/stream?last_event_id=15
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| `LLM_API_KEY` | LLM API 密钥 | (必填) |
-| `LLM_BASE_URL` | API 基地址 | `https://api.openai.com/v1` |
-| `LLM_MODEL` | 默认模型 | `gpt-4o-mini` |
+| `LLM_PROVIDER` | 模型提供商 (`talai` / `deepseek`) | `talai` |
+| `LLM_API_KEY` | TAL AI 网关 API 密钥 | (必填) |
+| `LLM_BASE_URL` | TAL AI 网关基地址 | `https://api.openai.com/v1` |
+| `LLM_MODEL` | 默认模型名称 | `gpt-4o-mini` |
+| `DEEPSEEK_API_KEY` | DeepSeek 原厂 API Key | — |
+| `DEEPSEEK_BASE_URL` | DeepSeek Anthropic 兼容端点 | `https://api.deepseek.com/anthropic` |
+| `DEEPSEEK_MODEL` | DeepSeek 模型名 | `deepseek-reasoner` |
+| `DEEPSEEK_ENABLE_THINKING` | 是否开启思维链 | `false` |
+| `DEEPSEEK_THINKING_BUDGET` | 思维链最大 token 数 | `10000` |
+| `DEEPSEEK_REASONING_EFFORT` | 推理努力级别 | `medium` |
+| `LLM_MAX_RETRIES` | LLM 调用最大重试次数 | `3` |
+| `LLM_RETRY_DELAY` | 重试基础延迟（秒，指数退避） | `1.0` |
+| `MODEL_RATE_LIMITS` | 模型限流配置（JSON，见下方说明） | 见默认值 |
+| `DB_HOST` | MySQL 主机 | `127.0.0.1` |
+| `DB_PORT` | MySQL 端口 | `3306` |
+| `DB_USER` | MySQL 用户 | `root` |
+| `DB_PASSWORD` | MySQL 密码 | (必填) |
+| `DB_NAME` | 数据库名 | `ai_agent` |
 | `LOG_LEVEL` | 日志级别 | `INFO` |
+
+---
+
+## 模型限流（Rate Limiting）
+
+### 配置方式
+
+通过 `MODEL_RATE_LIMITS` 环境变量传入 JSON，为每个模型设置独立的限流参数：
+
+```env
+MODEL_RATE_LIMITS={"deepseek-reasoner":{"rpm":60,"tpm":100000},"deepseek-v4-pro":{"rpm":120,"tpm":200000,"max_wait":90}}
+```
+
+| 字段 | 类型 | 说明 | 默认值 |
+|------|------|------|--------|
+| `rpm` | int | 每分钟最大请求数 | `60` |
+| `tpm` | int | 每分钟最大 token 数（input + output 合计） | `100000` |
+| `max_wait` | float | 限流排队最大等待秒数，超时返回错误 | `60.0` |
+
+> key 必须与实际调用时的 `model_name` 完全匹配（即 `DEEPSEEK_MODEL` 或 `LLM_MODEL` 配置的值）。
+
+### 工作原理
+
+采用**滑动窗口**算法（60 秒窗口），行为与 API 提供商侧的限流逻辑一致：
+
+```
+时间线：
+0s   ────── 30s ────── 60s ────── 90s
+│   窗口1 [0-60s]  │
+│        窗口2 [30-90s]   │
+```
+
+- **RPM 控制**：每次 LLM 调用前 `acquire_request()` 消耗 1 配额
+- **TPM 控制**：LLM 调用完成后 `report_tokens(input + output)` 消耗对应配额
+- 窗口已满时自动 sleep 等待最早记录过期（不浪费重试次数）
+- 等待超过 `max_wait` 秒抛出 `RateLimitExceeded` 异常
+
+### 监控接口
+
+```bash
+# 查看所有模型限流状态
+curl http://localhost:8000/v1/rate-limits
+
+# 查看指定模型
+curl http://localhost:8000/v1/rate-limits/deepseek-reasoner
+```
+
+**响应示例：**
+```json
+{
+  "deepseek-reasoner": {
+    "configured": true,
+    "rpm": {"usage": 12, "limit": 60},
+    "tpm": {"usage": 45200, "limit": 100000}
+  },
+  "deepseek-v4-pro": {
+    "configured": true,
+    "rpm": {"usage": 3, "limit": 120},
+    "tpm": {"usage": 8900, "limit": 200000}
+  }
+}
+```
+
+### 日志事件
+
+| 事件 | 级别 | 含义 |
+|------|------|------|
+| `rate_limiter.configured` | INFO | 启动时初始化完成 |
+| `rate_limiter.rpm_waited` | INFO | RPM 限流触发，记录等待时间 |
+| `rate_limiter.tpm_waited` | INFO | TPM 限流触发，记录等待时间 |
+| `rate_limiter.default_created` | DEBUG | 未配置的模型使用了默认限制 |
 
 ---
 
@@ -323,19 +411,24 @@ curl -N http://localhost:8000/v1/runs/{run_id}/stream?last_event_id=15
 
 ```
 app/
-├── main.py                  # FastAPI 入口
+├── main.py                  # FastAPI 入口 + startup 初始化
 ├── core/
-│   ├── config.py            # 配置管理
+│   ├── config.py            # 配置管理（环境变量）
+│   ├── database.py          # 数据库连接管理
 │   └── logging_config.py    # 结构化日志
 ├── models/
 │   ├── events.py            # RunEvent / EventType
 │   ├── schemas.py           # API 请求/响应模型
 │   └── streaming.py         # StreamingModel 抽象基类
 ├── adapters/
-│   └── openai_adapter.py    # OpenAI 兼容 API 实现
+│   ├── __init__.py          # 工厂函数 create_model()
+│   ├── talai_adapter.py     # TAL AI 网关（OpenAI 兼容）
+│   └── deepseek_adapter.py  # DeepSeek Anthropic API 适配
 ├── services/
-│   ├── agent_loop.py        # Agent Loop 核心引擎
-│   └── run_store.py         # Run 状态 + 对话历史存储
+│   ├── agent_loop.py        # Agent Loop 核心引擎（重试 + 限流）
+│   ├── rate_limiter.py      # 模型限流器（滑动窗口）
+│   ├── run_store.py         # Run 状态 + 对话历史（内存）
+│   └── db_service.py        # 数据库持久化服务
 └── api/
-    └── routes.py            # HTTP 路由
+    └── routes.py            # HTTP 路由（Run CRUD + 限流监控）
 ```
