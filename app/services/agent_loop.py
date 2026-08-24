@@ -502,10 +502,10 @@ async def _call_model_with_retry(
                 output_tokens=output_tokens,
             )
 
-            # ---- 限流：请求后上报 token 用量（TPM）----
+            # ---- 限流：请求后记录 token 用量（TPM，非阻塞）----
             total_tokens = input_tokens + output_tokens
             if total_tokens > 0:
-                await rate_limiter.report_tokens(model_key, total_tokens)
+                rate_limiter.report_tokens(model_key, total_tokens)
 
             return text_parts, tool_calls, finish_reason, input_tokens, output_tokens, ttft_ms
 

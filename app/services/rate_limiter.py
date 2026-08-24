@@ -32,9 +32,13 @@ class RateLimitExceeded(Exception):
         self.usage = usage
         self.limit = limit
         self.wait_needed = wait_needed
-        super().__init__(
-            f"Rate limit exceeded for {model_key} ({dimension}): "
-            f"{usage}/{limit}, need to wait {wait_needed:.1f}s"
+        # 不在 __init__ 固化消息，str() 时动态生成（因为上层可能修改 model_key/dimension）
+        super().__init__()
+
+    def __str__(self) -> str:
+        return (
+            f"Rate limit exceeded for {self.model_key} ({self.dimension}): "
+            f"{self.usage}/{self.limit}, need to wait {self.wait_needed:.1f}s"
         )
 
 
@@ -54,6 +58,7 @@ class SlidingWindowLimiter:
     acquire 时检查窗口内总 cost 是否超限：
         - 未超 → 记录并放行
         - 已超 → sleep 到最早记录过期，再重试
+        - cost > limit（单次超限）→ 直接放行并记录，避免死循环
     """
 
     def __init__(self, limit: int, window_seconds: float = 60.0):
@@ -78,6 +83,14 @@ class SlidingWindowLimiter:
     def limit(self) -> int:
         return self._limit
 
+    def record(self, cost: int) -> None:
+        """
+        非阻塞记录：只写入 deque，不检查配额。
+        用于 report_tokens —— token 已经消耗了，不能退回去。
+        """
+        now = time.monotonic()
+        self._records.append((now, cost))
+
     async def acquire(self, cost: int = 1, max_wait: float = 60.0) -> float:
         """
         获取配额。
@@ -92,6 +105,18 @@ class SlidingWindowLimiter:
         Raises:
             RateLimitExceeded: 等待超时
         """
+        # 防御：单次 cost 超过 limit，直接放行并记录
+        # 否则 usage + cost > limit 永远为 True → 死循环
+        if cost > self._limit:
+            logger.warning(
+                "rate_limiter.cost_exceeds_limit",
+                cost=cost,
+                limit=self._limit,
+            )
+            async with self._lock:
+                self._records.append((time.monotonic(), cost))
+            return 0.0
+
         total_waited = 0.0
 
         async with self._lock:
@@ -106,12 +131,8 @@ class SlidingWindowLimiter:
                     return total_waited
 
                 # 没配额 — 计算需要等多久（最早记录过期时间）
-                if not self._records:
-                    # 理论上不会走到这里（usage=0 但 cost > limit 的情况）
-                    wait = 0.1
-                else:
-                    oldest_time = self._records[0][0]
-                    wait = (oldest_time + self._window) - now + 0.01  # +10ms 余量
+                oldest_time = self._records[0][0]
+                wait = (oldest_time + self._window) - now + 0.01  # +10ms 余量
 
                 if total_waited + wait > max_wait:
                     raise RateLimitExceeded(
@@ -171,7 +192,7 @@ class ModelRateLimiter:
 
     async def acquire_request(self, model_key: str) -> float:
         """
-        请求前调用：消耗 1 RPM 配额。
+        请求前调用：消耗 1 RPM 配额，同时检查 TPM 窗口是否过载。
 
         Returns:
             实际等待的秒数（0 表示未等待）
@@ -179,52 +200,57 @@ class ModelRateLimiter:
         Raises:
             RateLimitExceeded: 等待超时
         """
-        config, rpm_limiter, _ = self._get_or_create(model_key)
+        config, rpm_limiter, tpm_limiter = self._get_or_create(model_key)
+        total_waited = 0.0
+
+        # 1) RPM 限流
         try:
             waited = await rpm_limiter.acquire(cost=1, max_wait=config.max_wait)
-            if waited > 0:
-                logger.info(
-                    "rate_limiter.rpm_waited",
-                    model=model_key,
-                    waited_ms=round(waited * 1000),
-                )
-            return waited
+            total_waited += waited
         except RateLimitExceeded as e:
             e.model_key = model_key
             e.dimension = "RPM"
             raise
 
-    async def report_tokens(self, model_key: str, tokens: int) -> float:
+        # 2) TPM 检查：如果窗口内 token 用量已达上限，等待到有空间
+        tpm_limiter._cleanup(time.monotonic())
+        tpm_usage = sum(cost for _, cost in tpm_limiter._records)
+        if tpm_usage >= tpm_limiter.limit:
+            try:
+                # 用 cost=1 尝试获取（等待窗口腾出空间）
+                waited = await tpm_limiter.acquire(cost=1, max_wait=config.max_wait)
+                total_waited += waited
+            except RateLimitExceeded as e:
+                e.model_key = model_key
+                e.dimension = "TPM"
+                raise
+
+        if total_waited > 0:
+            logger.info(
+                "rate_limiter.request_waited",
+                model=model_key,
+                waited_ms=round(total_waited * 1000),
+            )
+
+        return total_waited
+
+    def report_tokens(self, model_key: str, tokens: int) -> None:
         """
-        请求后调用：上报消耗的 token 数，消耗 TPM 配额。
+        请求后调用：记录 token 用量到 TPM 窗口。
 
-        如果 TPM 已满，会等待直到有空间（或超时）。
-        这样下一次请求就会被自然限速。
-
-        Returns:
-            实际等待的秒数
-
-        Raises:
-            RateLimitExceeded: 等待超时
+        非阻塞 —— token 已经消耗了，无法退回。
+        记录后，下一次 acquire_request 会检查 TPM 窗口并自然限速。
         """
         if tokens <= 0:
-            return 0.0
+            return
 
-        config, _, tpm_limiter = self._get_or_create(model_key)
-        try:
-            waited = await tpm_limiter.acquire(cost=tokens, max_wait=config.max_wait)
-            if waited > 0:
-                logger.info(
-                    "rate_limiter.tpm_waited",
-                    model=model_key,
-                    tokens=tokens,
-                    waited_ms=round(waited * 1000),
-                )
-            return waited
-        except RateLimitExceeded as e:
-            e.model_key = model_key
-            e.dimension = "TPM"
-            raise
+        _, _, tpm_limiter = self._get_or_create(model_key)
+        tpm_limiter.record(tokens)
+        logger.debug(
+            "rate_limiter.tokens_recorded",
+            model=model_key,
+            tokens=tokens,
+        )
 
     def get_status(self, model_key: str) -> dict:
         """获取模型限流状态（用于监控/调试接口）"""
