@@ -3,6 +3,7 @@
 通过环境变量 + .env 文件加载配置
 """
 
+import json
 import os
 from pathlib import Path
 
@@ -55,6 +56,13 @@ class Settings:
     # 重试配置
     LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "3"))
     LLM_RETRY_DELAY: float = float(os.getenv("LLM_RETRY_DELAY", "1.0"))
+
+    # 模型限流配置（JSON 格式，按模型名设置 RPM/TPM）
+    # 格式: {"model_name": {"rpm": 60, "tpm": 100000, "max_wait": 60}}
+    MODEL_RATE_LIMITS: str = os.getenv("MODEL_RATE_LIMITS", json.dumps({
+        "deepseek-reasoner": {"rpm": 60, "tpm": 100000},
+        "deepseek-v4-pro": {"rpm": 120, "tpm": 200000},
+    }))
 
 
 settings = Settings()

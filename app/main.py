@@ -71,6 +71,17 @@ def create_app() -> FastAPI:
         import structlog
         structlog.get_logger().info("database.initialized")
 
+    # 限流器初始化
+    @app.on_event("startup")
+    async def _init_rate_limiter():
+        import json as _json
+        import structlog
+        from app.services.rate_limiter import rate_limiter, ModelRateLimit
+        rate_limits = _json.loads(settings.MODEL_RATE_LIMITS)
+        for model_key, cfg in rate_limits.items():
+            rate_limiter.configure(model_key, ModelRateLimit(**cfg))
+        structlog.get_logger().info("rate_limiter.initialized", models=list(rate_limits.keys()))
+
     # 后台清理任务
     @app.on_event("startup")
     async def _start_cleanup():

@@ -34,6 +34,7 @@ from app.models.events import EventType
 from app.models.streaming import StreamingModel, TextChunk, ToolCallChunk, StreamDone
 from app.services.run_store import RunState
 from app.services.db_service import db_service
+from app.services.rate_limiter import rate_limiter, RateLimitExceeded
 
 logger = structlog.get_logger(__name__)
 
@@ -419,10 +420,14 @@ async def _call_model_with_retry(
     """
     attempt = 0
     last_exception = None
+    model_key = model.model_name
 
     while attempt < settings.LLM_MAX_RETRIES:
         attempt += 1
         try:
+            # ---- 限流：请求前获取 RPM 配额 ----
+            await rate_limiter.acquire_request(model_key)
+
             text_parts: list[str] = []
             tool_calls: list[ToolCallChunk] = []
             finish_reason = "stop"
@@ -489,6 +494,11 @@ async def _call_model_with_retry(
                 input_tokens=input_tokens,
                 output_tokens=output_tokens,
             )
+
+            # ---- 限流：请求后上报 token 用量（TPM）----
+            total_tokens = input_tokens + output_tokens
+            if total_tokens > 0:
+                await rate_limiter.report_tokens(model_key, total_tokens)
 
             return text_parts, tool_calls, finish_reason, input_tokens, output_tokens, ttft_ms
 

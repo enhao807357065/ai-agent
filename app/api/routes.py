@@ -542,3 +542,25 @@ async def list_runs(limit: int = 20):
     # 按创建时间倒序，截取 limit
     result.sort(key=lambda r: r.created_at, reverse=True)
     return result[:limit]
+
+
+# ============================================================
+# 限流状态查询
+# ============================================================
+
+@router.get("/rate-limits")
+async def get_rate_limits():
+    """查询所有模型的限流状态"""
+    from app.services.rate_limiter import rate_limiter
+    return rate_limiter.get_all_status()
+
+
+@router.get("/rate-limits/{model_key}")
+async def get_rate_limit_for_model(model_key: str):
+    """查询指定模型的限流状态"""
+    from app.services.rate_limiter import rate_limiter
+    status = rate_limiter.get_status(model_key)
+    if not status.get("configured"):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail=f"Model '{model_key}' not configured")
+    return status
