@@ -18,7 +18,9 @@ from typing import Any, AsyncIterator
 
 from anthropic import AsyncAnthropic
 
-from app.models.streaming import StreamingModel, TextChunk, ToolCallChunk, StreamDone, StreamChunk
+from app.models.streaming import (
+    StreamingModel, TextChunk, ToolCallChunk, StreamDone, StreamChunk, CompletionResult,
+)
 
 
 class DeepSeekAnthropicModel(StreamingModel):
@@ -271,6 +273,87 @@ class DeepSeekAnthropicModel(StreamingModel):
             )
 
         yield StreamDone(
+            finish_reason=finish_reason,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        response_format: dict[str, Any] | None = None,
+    ) -> CompletionResult:
+        """调用 DeepSeek Anthropic API 的非流式接口"""
+
+        system_prompt, anthropic_messages = self._convert_messages(messages, response_format)
+
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": anthropic_messages,
+            "max_tokens": max_tokens,
+        }
+
+        # 结构化输出时温度设低
+        if response_format and response_format.get("type") in ("json_object", "json_schema"):
+            kwargs["temperature"] = min(temperature, 0.3)
+        else:
+            kwargs["temperature"] = temperature
+
+        if system_prompt:
+            kwargs["system"] = system_prompt
+
+        if tools:
+            kwargs["tools"] = self._convert_tools(tools)
+            kwargs["tool_choice"] = {"type": "auto"}
+
+        # Thinking 模式
+        if self._enable_thinking:
+            kwargs["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": self._thinking_budget_tokens,
+            }
+
+        response = await self._client.messages.create(**kwargs)
+
+        # 解析 response
+        content_text = ""
+        tool_calls: list[ToolCallChunk] = []
+        has_prefill = response_format and response_format.get("type") in ("json_object", "json_schema")
+
+        if has_prefill:
+            content_text = "{"
+
+        for block in response.content:
+            if block.type == "text":
+                content_text += block.text
+            elif block.type == "tool_use":
+                tool_calls.append(ToolCallChunk(
+                    id=block.id,
+                    name=block.name,
+                    arguments=block.input if isinstance(block.input, dict) else {},
+                ))
+            # thinking block — 不输出
+
+        # finish_reason 转换
+        stop_reason = response.stop_reason
+        if stop_reason == "end_turn":
+            finish_reason = "stop"
+        elif stop_reason == "tool_use":
+            finish_reason = "tool_calls"
+        elif stop_reason == "max_tokens":
+            finish_reason = "length"
+        else:
+            finish_reason = stop_reason or "stop"
+
+        input_tokens = response.usage.input_tokens or 0
+        output_tokens = response.usage.output_tokens or 0
+
+        return CompletionResult(
+            content=content_text,
+            tool_calls=tool_calls,
             finish_reason=finish_reason,
             input_tokens=input_tokens,
             output_tokens=output_tokens,

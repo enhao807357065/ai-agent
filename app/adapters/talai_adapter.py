@@ -11,7 +11,9 @@ from typing import Any, AsyncIterator
 
 from openai import AsyncOpenAI
 
-from app.models.streaming import StreamingModel, TextChunk, ToolCallChunk, StreamDone, StreamChunk
+from app.models.streaming import (
+    StreamingModel, TextChunk, ToolCallChunk, StreamDone, StreamChunk, CompletionResult,
+)
 
 
 class TalAIStreamingModel(StreamingModel):
@@ -125,6 +127,69 @@ class TalAIStreamingModel(StreamingModel):
             )
 
         yield StreamDone(
+            finish_reason=finish_reason,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+
+    async def complete(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]] | None = None,
+        temperature: float = 0.7,
+        max_tokens: int = 4096,
+        response_format: dict[str, Any] | None = None,
+    ) -> CompletionResult:
+        """调用 OpenAI 兼容 API 的非流式接口"""
+
+        kwargs: dict[str, Any] = {
+            "model": self._model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            "stream": False,
+        }
+
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+
+        if response_format:
+            kwargs["response_format"] = response_format
+
+        if self._extra_body:
+            kwargs["extra_body"] = self._extra_body
+
+        response = await self._client.chat.completions.create(**kwargs)
+
+        choice = response.choices[0]
+        content = choice.message.content or ""
+        finish_reason = choice.finish_reason or "stop"
+
+        # 解析 tool_calls
+        tool_calls: list[ToolCallChunk] = []
+        if choice.message.tool_calls:
+            for tc in choice.message.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments) if tc.function.arguments else {}
+                except json.JSONDecodeError:
+                    args = {"_raw": tc.function.arguments}
+                tool_calls.append(ToolCallChunk(
+                    id=tc.id,
+                    name=tc.function.name,
+                    arguments=args,
+                ))
+
+        # token 用量
+        input_tokens = 0
+        output_tokens = 0
+        if response.usage:
+            input_tokens = response.usage.prompt_tokens or 0
+            output_tokens = response.usage.completion_tokens or 0
+
+        return CompletionResult(
+            content=content,
+            tool_calls=tool_calls,
             finish_reason=finish_reason,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
