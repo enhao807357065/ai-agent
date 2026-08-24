@@ -63,6 +63,20 @@ try:
 except ImportError:
     pass
 
+try:
+    from anthropic import APITimeoutError as AnthropicTimeout
+    from anthropic import APIConnectionError as AnthropicConnError
+    from anthropic import InternalServerError as AnthropicServerError
+    from anthropic import RateLimitError as AnthropicRateLimit
+    RETRIABLE_EXCEPTIONS = RETRIABLE_EXCEPTIONS + (
+        AnthropicTimeout,
+        AnthropicConnError,
+        AnthropicServerError,
+        AnthropicRateLimit,
+    )
+except ImportError:
+    pass
+
 
 def _log_retry(retry_state: RetryCallState) -> None:
     """重试前记录日志"""

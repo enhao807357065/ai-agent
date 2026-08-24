@@ -68,6 +68,7 @@ class StreamingModel(ABC):
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        response_format: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """
         流式调用模型（async generator）
@@ -77,6 +78,9 @@ class StreamingModel(ABC):
             tools: OpenAI 格式的 tools 定义（可选）
             temperature: 生成温度
             max_tokens: 最大输出 token
+            response_format: 结构化输出格式（可选）
+                - {"type": "json_object"} — 强制 JSON 输出
+                - {"type": "json_schema", "json_schema": {...}} — JSON Schema 约束
 
         Yields:
             TextChunk | ToolCallChunk | StreamDone

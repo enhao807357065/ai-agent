@@ -43,6 +43,7 @@ class TalAIStreamingModel(StreamingModel):
         tools: list[dict[str, Any]] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
+        response_format: dict[str, Any] | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """调用 OpenAI 兼容 API 的流式接口"""
 
@@ -57,6 +58,9 @@ class TalAIStreamingModel(StreamingModel):
         if tools:
             kwargs["tools"] = tools
             kwargs["tool_choice"] = "auto"
+
+        if response_format:
+            kwargs["response_format"] = response_format
 
         if self._extra_body:
             kwargs["extra_body"] = self._extra_body
