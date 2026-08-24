@@ -73,6 +73,30 @@ curl -s -N "$BASE_URL/runs/$RUN_ID/stream?last_event_id=1"
 
 > 更多 curl 示例请参考 [docs/curl-examples.md](docs/curl-examples.md)
 
+### 作为兼容网关使用
+
+服务还暴露了三种常见 LLM 协议。它们共享当前 `.env` 的 `LLM_PROVIDER` 和上游模型配置：请求先规范化为内部 `StreamingModel`，再转换回调用方期望的协议，因此可以用一个后端同时服务 OpenAI SDK、Responses API 客户端和 Anthropic SDK 客户端。
+
+```bash
+# OpenAI Chat Completions
+curl -s http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"hello"}]}'
+
+# OpenAI Responses API
+curl -s http://localhost:8000/v1/responses \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-pro","input":"hello"}'
+
+# Anthropic Messages API（Anthropic 原生客户端可将 base_url 指向本服务）
+curl -s http://localhost:8000/v1/messages \
+  -H 'Content-Type: application/json' \
+  -H 'anthropic-version: 2023-06-01' \
+  -d '{"model":"deepseek-v4-pro","max_tokens":128,"messages":[{"role":"user","content":"hello"}]}'
+```
+
+流式调用时三者均传 `"stream": true`，返回各自协议的 SSE 事件格式。模型发现接口为 `GET /v1/models`。
+
 ---
 
 ## 项目结构
@@ -175,6 +199,10 @@ Agent Loop（每轮 Turn）:
 | GET | `/v1/system-prompts/{id}` | 获取指定 Prompt 详情 |
 | POST | `/v1/system-prompts/{id}/render` | Jinja2 渲染指定 Prompt |
 | GET | `/v1/rate-limits` | 查询限流状态 |
+| GET | `/v1/models` | OpenAI 兼容模型列表 |
+| POST | `/v1/chat/completions` | OpenAI Chat Completions 兼容（含 SSE / function tools） |
+| POST | `/v1/responses` | OpenAI Responses 兼容（含 SSE / function tools） |
+| POST | `/v1/messages` | Anthropic Messages 兼容（含 SSE / tool_use） |
 | GET | `/health` | 健康检查 |
 
 ---

@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.core.logging_config import setup_logging
+from app.api.gateway import router as gateway_router
 from app.api.routes import router
 from app.services.run_store import run_store
 
@@ -93,6 +94,8 @@ def create_app() -> FastAPI:
 
     # 注册路由
     app.include_router(router)
+    # OpenAI Chat / Responses / Anthropic Messages 兼容网关
+    app.include_router(gateway_router)
 
     # 静态文件（前端页面）
     import os

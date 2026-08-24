@@ -172,6 +172,77 @@ curl -s http://localhost:8000/health
 
 ---
 
+## 11. 兼容网关接口
+
+这组接口不会创建 Agent Run，也不会保存会话；它们是无状态的协议转换层。调用方应在每一轮把需要的上下文重新传入。三种协议都支持 `stream: true`，且返回各自规范的 SSE 事件。
+
+### 11.1 模型列表（OpenAI 兼容）
+
+```bash
+curl -s "$BASE_URL/models" | python3 -m json.tool
+```
+
+### 11.2 OpenAI Chat Completions
+
+```bash
+# 非流式
+curl -s -X POST "$BASE_URL/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "deepseek-v4-pro",
+    "messages": [
+      {"role": "system", "content": "你是一个简洁的助手"},
+      {"role": "user", "content": "什么是 Agent？"}
+    ]
+  }' | python3 -m json.tool
+
+# 流式：OpenAI data: chunk + [DONE]
+curl -N -s -X POST "$BASE_URL/chat/completions" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"hello"}],"stream":true}'
+```
+
+### 11.3 OpenAI Responses
+
+```bash
+# 非流式
+curl -s -X POST "$BASE_URL/responses" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "deepseek-v4-pro",
+    "instructions": "你是一个简洁的助手",
+    "input": "什么是 Agent？"
+  }' | python3 -m json.tool
+
+# 流式：response.created / response.output_text.delta / response.completed
+curl -N -s -X POST "$BASE_URL/responses" \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek-v4-pro","input":"hello","stream":true}'
+```
+
+### 11.4 Anthropic Messages
+
+```bash
+# 非流式
+curl -s -X POST "$BASE_URL/messages" \
+  -H 'Content-Type: application/json' \
+  -H 'anthropic-version: 2023-06-01' \
+  -d '{
+    "model": "deepseek-v4-pro",
+    "max_tokens": 256,
+    "system": "你是一个简洁的助手",
+    "messages": [{"role": "user", "content": "什么是 Agent？"}]
+  }' | python3 -m json.tool
+
+# 流式：message_start / content_block_delta / message_stop
+curl -N -s -X POST "$BASE_URL/messages" \
+  -H 'Content-Type: application/json' \
+  -H 'anthropic-version: 2023-06-01' \
+  -d '{"model":"deepseek-v4-pro","max_tokens":256,"messages":[{"role":"user","content":"hello"}],"stream":true}'
+```
+
+---
+
 ## 流式 vs 非流式对比
 
 | 特性 | `stream: true`（默认） | `stream: false` |
