@@ -12,7 +12,10 @@ import uuid
 
 import structlog
 from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
@@ -33,6 +36,23 @@ def create_app() -> FastAPI:
         description="基于 Agent Loop 的 LLM 服务，通过 SSE 流式输出 RunEvent",
         version="0.1.0",
     )
+
+    @app.exception_handler(RequestValidationError)
+    async def gateway_validation_error_handler(request: Request, exc: RequestValidationError):
+        """Gateway 的请求校验也使用统一错误 envelope；其他 API 保持 FastAPI 默认格式。"""
+        if request.url.path in {"/v1/chat/completions", "/v1/responses", "/v1/messages"}:
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "object": "gateway.error",
+                    "error": {
+                        "code": "invalid_request",
+                        "message": "Gateway request validation failed.",
+                        "retryable": False,
+                    },
+                },
+            )
+        return await request_validation_exception_handler(request, exc)
 
     # CORS
     app.add_middleware(
@@ -115,7 +135,7 @@ def create_app() -> FastAPI:
         return {
             "status": "ok",
             "model": settings.LLM_MODEL,
-            "base_url": settings.LLM_BASE_URL,
+            "base_url": settings.TALAI_BASE_URL,
         }
 
     # 数据库初始化

@@ -37,7 +37,7 @@ from pydantic import BaseModel, Field
 # 配置加载
 # ============================================================
 
-# 加载 .env 文件（项目根目录），读取 LLM_API_KEY
+# 加载 .env 文件（项目根目录），读取 TALAI_API_KEY
 _env_path = Path(__file__).resolve().parents[2] / ".env"  # week01/1-3 -> ai-agent/.env
 load_dotenv(dotenv_path=_env_path)
 
@@ -45,11 +45,11 @@ load_dotenv(dotenv_path=_env_path)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "1-2"))
 from ds_adapter import DeepSeekAdapter  # noqa: E402
 
-API_KEY = os.getenv("LLM_API_KEY", "")
+API_KEY = os.getenv("TALAI_API_KEY", "")
 MODEL_NAME = "deepseek-v4-pro"
 
 if not API_KEY:
-    print("⚠️  警告: 未找到 LLM_API_KEY 环境变量，请检查 .env 文件")
+    print("⚠️  警告: 未找到 TALAI_API_KEY 环境变量，请检查 .env 文件")
 
 # ============================================================
 # 通过 Adapter 复用配置，创建异步客户端

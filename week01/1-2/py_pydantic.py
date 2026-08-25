@@ -20,7 +20,7 @@ class AgentAction(BaseModel):
     confidence: float = Field(ge=0, le=1, description="当前判断的置信度，范围 0 到 1")
 
 load_dotenv()
-apikey = os.getenv("LLM_API_KEY")
+apikey = os.getenv("TALAI_API_KEY")
 
 client = OpenAI(
     base_url="http://ai-service.tal.com/openai-compatible/v1",

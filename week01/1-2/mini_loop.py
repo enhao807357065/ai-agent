@@ -36,11 +36,11 @@ print(f"provider: {provider}")
 
 if provider == "deepseek":
     adapter: ModelAdapter = DeepSeekAdapter(
-        api_key=os.environ["LLM_API_KEY"]
+        api_key=os.environ["TALAI_API_KEY"]
     )
 elif provider == "openai":
     adapter = OpenAIAdapter(
-        apikey=os.environ["LLM_API_KEY"],
+        apikey=os.environ["TALAI_API_KEY"],
     )
 else:
     raise ValueError(f"未知 MODEL_PROVIDER: {provider}")

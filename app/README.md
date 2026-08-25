@@ -315,8 +315,8 @@ curl -N http://localhost:8000/v1/runs/{run_id}/stream?last_event_id=15
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
 | `LLM_PROVIDER` | 模型提供商 (`talai` / `deepseek`) | `talai` |
-| `LLM_API_KEY` | TAL AI 网关 API 密钥 | (必填) |
-| `LLM_BASE_URL` | TAL AI 网关基地址 | `https://api.openai.com/v1` |
+| `TALAI_API_KEY` | TAL AI 网关 API 密钥 | (必填) |
+| `TALAI_BASE_URL` | TAL AI 网关基地址 | `http://ai-service.tal.com/openai-compatible/v1` |
 | `LLM_MODEL` | 默认模型名称 | `gpt-4o-mini` |
 | `DEEPSEEK_API_KEY` | DeepSeek 原厂 API Key | — |
 | `DEEPSEEK_BASE_URL` | DeepSeek Anthropic 兼容端点 | `https://api.deepseek.com/anthropic` |

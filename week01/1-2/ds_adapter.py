@@ -8,7 +8,7 @@ from typing import Any
 from dataclasses import asdict
 
 load_dotenv()
-api_key = os.getenv("LLM_API_KEY")
+api_key = os.getenv("TALAI_API_KEY")
 
 class DeepSeekAdapter(ModelAdapter):
     name = "deepseek"

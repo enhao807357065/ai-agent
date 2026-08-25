@@ -5,7 +5,7 @@ from field_rule import AgentDecision
 
 load_dotenv()
 
-apikey = os.getenv("LLM_API_KEY")
+apikey = os.getenv("TALAI_API_KEY")
 
 client = OpenAI(
     base_url="http://ai-service.tal.com/openai-compatible/v1",
