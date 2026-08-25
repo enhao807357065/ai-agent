@@ -19,6 +19,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.adapters import create_model
 from app.core.config import settings
+from app.models.schemas import (
+    AnthropicMessagesRequest,
+    ChatCompletionRequest,
+    ResponsesRequest,
+)
 from app.models.streaming import CompletionResult, StreamDone, TextChunk, ToolCallChunk
 
 logger = structlog.get_logger(__name__)
@@ -205,19 +210,17 @@ async def list_models() -> dict[str, Any]:
 
 
 @router.post("/v1/chat/completions")
-async def chat_completions(body: dict[str, Any], request: Request):
+async def chat_completions(body: ChatCompletionRequest, request: Request):
     """OpenAI Chat Completions 兼容接口（支持 function tools 与 SSE）。"""
-    messages = body.get("messages")
-    if not isinstance(messages, list) or not messages:
-        raise HTTPException(400, "messages must be a non-empty array")
-    model = create_model(body.get("model"))
-    stream = bool(body.get("stream", False))
+    messages = [message.model_dump(exclude_none=True) for message in body.messages]
+    model = create_model(body.model)
+    stream = body.stream
     kwargs = {
         "messages": messages,
-        "tools": _openai_tools_to_internal(body.get("tools")),
-        "temperature": body.get("temperature", 0.7),
-        "max_tokens": body.get("max_tokens", body.get("max_completion_tokens", 4096)),
-        "response_format": body.get("response_format"),
+        "tools": _openai_tools_to_internal([tool.model_dump() for tool in body.tools] if body.tools else None),
+        "temperature": body.temperature,
+        "max_tokens": body.max_tokens or body.max_completion_tokens or 4096,
+        "response_format": body.response_format,
     }
     completion_id = _id("chatcmpl")
     created = _now()
@@ -267,20 +270,18 @@ async def chat_completions(body: dict[str, Any], request: Request):
 
 
 @router.post("/v1/responses")
-async def responses(body: dict[str, Any]):
+async def responses(body: ResponsesRequest):
     """OpenAI Responses 兼容接口（无状态；客户端每轮传完整 input）。"""
-    if "input" not in body:
-        raise HTTPException(400, "input is required")
-    model = create_model(body.get("model"))
-    stream = bool(body.get("stream", False))
-    messages = _responses_input_to_internal(body.get("instructions"), body["input"])
-    text_config = body.get("text", {})
-    response_format = text_config.get("format") if isinstance(text_config, dict) else None
+    model = create_model(body.model)
+    stream = body.stream
+    input_value = body.input if isinstance(body.input, str) else [item.model_dump(exclude_none=True) for item in body.input]
+    messages = _responses_input_to_internal(body.instructions, input_value)
+    response_format = body.text.format if body.text else None
     kwargs = {
         "messages": messages,
-        "tools": _openai_tools_to_internal(body.get("tools")),
-        "temperature": body.get("temperature", 0.7),
-        "max_tokens": body.get("max_output_tokens", 4096),
+        "tools": _openai_tools_to_internal([tool.model_dump() for tool in body.tools] if body.tools else None),
+        "temperature": body.temperature,
+        "max_tokens": body.max_output_tokens,
         "response_format": response_format,
     }
     response_id = _id("resp")
@@ -330,20 +331,16 @@ async def responses(body: dict[str, Any]):
 
 
 @router.post("/v1/messages")
-async def anthropic_messages(body: dict[str, Any]):
+async def anthropic_messages(body: AnthropicMessagesRequest):
     """Anthropic Messages 兼容接口（支持 tool_use / tool_result 和 Anthropic SSE）。"""
-    messages = body.get("messages")
-    if not isinstance(messages, list) or not messages:
-        raise HTTPException(400, "messages must be a non-empty array")
-    if "max_tokens" not in body:
-        raise HTTPException(400, "max_tokens is required")
-    model = create_model(body.get("model"))
-    stream = bool(body.get("stream", False))
+    messages = [message.model_dump() for message in body.messages]
+    model = create_model(body.model)
+    stream = body.stream
     kwargs = {
-        "messages": _anthropic_messages_to_internal(body.get("system"), messages),
-        "tools": _anthropic_tools_to_internal(body.get("tools")),
-        "temperature": body.get("temperature", 0.7),
-        "max_tokens": body["max_tokens"],
+        "messages": _anthropic_messages_to_internal(body.system, messages),
+        "tools": _anthropic_tools_to_internal([tool.model_dump() for tool in body.tools] if body.tools else None),
+        "temperature": body.temperature,
+        "max_tokens": body.max_tokens,
         "response_format": None,
     }
     message_id = _id("msg")

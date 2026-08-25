@@ -5,7 +5,7 @@ API 请求/响应 Schema 定义
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -76,3 +76,107 @@ class CancelRunResponse(BaseModel):
     run_id: str
     status: RunStatus
     message: str
+
+
+# ============================================================
+# LLM Gateway 请求模型
+# ============================================================
+
+class OpenAIFunction(BaseModel):
+    """OpenAI function tool 的函数定义。"""
+
+    name: str
+    description: str = ""
+    parameters: dict[str, Any] = Field(
+        default_factory=lambda: {"type": "object", "properties": {}},
+    )
+
+
+class OpenAITool(BaseModel):
+    """OpenAI Chat Completions / Responses 的 function tool。"""
+
+    type: Literal["function"] = "function"
+    function: OpenAIFunction
+
+
+class GatewayChatMessage(BaseModel):
+    """网关接收的 OpenAI Chat message。"""
+
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str | list[dict[str, Any]] | None = None
+    tool_call_id: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+
+
+class ChatCompletionRequest(BaseModel):
+    """POST /v1/chat/completions 请求。"""
+
+    model: str | None = None
+    messages: list[GatewayChatMessage] = Field(min_length=1)
+    tools: list[OpenAITool] | None = None
+    stream: bool = False
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    max_tokens: int | None = Field(default=None, gt=0)
+    max_completion_tokens: int | None = Field(default=None, gt=0)
+    response_format: dict[str, Any] | None = None
+
+
+class ResponsesInputItem(BaseModel):
+    """OpenAI Responses API 的单个 input item。"""
+
+    type: str | None = None
+    role: Literal["user", "assistant", "system", "developer"] | None = None
+    content: str | list[dict[str, Any]] | None = None
+    id: str | None = None
+    call_id: str | None = None
+    name: str | None = None
+    arguments: str | None = None
+    output: str | None = None
+
+
+class ResponsesTextConfig(BaseModel):
+    """Responses API 的 text 配置。"""
+
+    format: dict[str, Any] | None = None
+
+
+class ResponsesRequest(BaseModel):
+    """POST /v1/responses 请求。"""
+
+    model: str | None = None
+    instructions: str | None = None
+    input: str | list[ResponsesInputItem]
+    tools: list[OpenAITool] | None = None
+    stream: bool = False
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    max_output_tokens: int = Field(default=4096, gt=0)
+    text: ResponsesTextConfig | None = None
+
+
+class AnthropicTool(BaseModel):
+    """Anthropic Messages API 的 tool 定义。"""
+
+    name: str
+    description: str = ""
+    input_schema: dict[str, Any] = Field(
+        default_factory=lambda: {"type": "object", "properties": {}},
+    )
+
+
+class AnthropicMessage(BaseModel):
+    """Anthropic Messages API 的 message。"""
+
+    role: Literal["user", "assistant"]
+    content: str | list[dict[str, Any]]
+
+
+class AnthropicMessagesRequest(BaseModel):
+    """POST /v1/messages 请求。"""
+
+    model: str | None = None
+    max_tokens: int = Field(gt=0)
+    messages: list[AnthropicMessage] = Field(min_length=1)
+    system: str | list[dict[str, Any]] | None = None
+    tools: list[AnthropicTool] | None = None
+    stream: bool = False
+    temperature: float = Field(default=0.7, ge=0.0, le=1.0)

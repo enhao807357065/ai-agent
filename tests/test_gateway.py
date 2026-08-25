@@ -101,3 +101,19 @@ def test_anthropic_messages_non_stream_and_stream(monkeypatch):
     assert stream_response.status_code == 200
     assert "event: message_start" in stream_response.text
     assert "event: message_stop" in stream_response.text
+
+
+def test_gateway_request_validation(monkeypatch):
+    with client_with_fake_model(monkeypatch) as client:
+        empty_messages = client.post("/v1/chat/completions", json={"messages": []})
+        invalid_temperature = client.post("/v1/responses", json={"input": "hi", "temperature": 3})
+        missing_max_tokens = client.post("/v1/messages", json={"messages": [{"role": "user", "content": "hi"}]})
+        invalid_tool_type = client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"type": "web_search", "function": {"name": "search"}}],
+        })
+
+    assert empty_messages.status_code == 422
+    assert invalid_temperature.status_code == 422
+    assert missing_max_tokens.status_code == 422
+    assert invalid_tool_type.status_code == 422
