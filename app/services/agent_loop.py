@@ -2,7 +2,7 @@
 Agent Loop — 核心执行引擎（增强版）
 
 增强特性：
-    1. 异常重试：LLM 调用失败时自动重试（指数退避）
+    1. Gateway 模型调用：逻辑模型/能力路由、熔断及 fallback 由 GatewayModelRouter 统一处理
     2. 详细日志：每步操作记录耗时、token 用量、错误详情
     3. Checkpoint：每轮 turn 结束后持久化状态，支持断点恢复
 
@@ -17,24 +17,25 @@ import asyncio
 import json
 import time
 import traceback
-from typing import Any, Callable, Awaitable
+from collections.abc import AsyncIterator
+from typing import Any, Callable, Awaitable, Protocol
 
 import structlog
-from tenacity import (
-    retry,
-    stop_after_attempt,
-    wait_exponential,
-    retry_if_exception_type,
-    before_sleep_log,
-    RetryCallState,
-)
 
 from app.core.config import settings
 from app.models.events import EventType
-from app.models.streaming import StreamingModel, TextChunk, ToolCallChunk, StreamDone
+from app.models.gateway import (
+    GatewayCompletedEvent,
+    GatewayModelCall,
+    GatewayModelResult,
+    GatewayStreamEvent,
+    GatewayTextDelta,
+    GatewayToolCallEvent,
+)
+from app.models.streaming import ToolCallChunk
 from app.services.run_store import RunState
 from app.services.db_service import db_service
-from app.services.rate_limiter import rate_limiter, RateLimitExceeded
+from app.services.rate_limiter import RateLimitExceeded
 
 logger = structlog.get_logger(__name__)
 
@@ -42,54 +43,20 @@ logger = structlog.get_logger(__name__)
 ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[str]]
 
 
-# ============================================================
-# 重试配置
-# ============================================================
+class GatewayExecutionPort(Protocol):
+    """Agent Loop 依赖的进程内模型执行端口；HTTP Gateway 也复用同一实现。"""
 
-# 可重试的异常类型（网络错误、超时、服务端 5xx）
-RETRIABLE_EXCEPTIONS = (
-    ConnectionError,
-    TimeoutError,
-    asyncio.TimeoutError,
-)
+    async def complete(
+        self,
+        logical_model: str | None,
+        call: GatewayModelCall,
+    ) -> GatewayModelResult: ...
 
-try:
-    from openai import APITimeoutError, APIConnectionError, InternalServerError, RateLimitError
-    RETRIABLE_EXCEPTIONS = RETRIABLE_EXCEPTIONS + (
-        APITimeoutError,
-        APIConnectionError,
-        InternalServerError,
-        RateLimitError,
-    )
-except ImportError:
-    pass
-
-try:
-    from anthropic import APITimeoutError as AnthropicTimeout
-    from anthropic import APIConnectionError as AnthropicConnError
-    from anthropic import InternalServerError as AnthropicServerError
-    from anthropic import RateLimitError as AnthropicRateLimit
-    RETRIABLE_EXCEPTIONS = RETRIABLE_EXCEPTIONS + (
-        AnthropicTimeout,
-        AnthropicConnError,
-        AnthropicServerError,
-        AnthropicRateLimit,
-    )
-except ImportError:
-    pass
-
-
-def _log_retry(retry_state: RetryCallState) -> None:
-    """重试前记录日志"""
-    exception = retry_state.outcome.exception() if retry_state.outcome else None
-    logger.warning(
-        "agent_loop.llm_retry",
-        attempt=retry_state.attempt_number,
-        max_attempts=settings.LLM_MAX_RETRIES,
-        exception_type=type(exception).__name__ if exception else None,
-        exception_msg=str(exception) if exception else None,
-        wait_seconds=retry_state.next_action.sleep if retry_state.next_action else 0,
-    )
+    def stream(
+        self,
+        logical_model: str | None,
+        call: GatewayModelCall,
+    ) -> AsyncIterator[GatewayStreamEvent]: ...
 
 
 # ============================================================
@@ -98,12 +65,14 @@ def _log_retry(retry_state: RetryCallState) -> None:
 
 async def agent_loop(
     run_state: RunState,
-    model: StreamingModel,
+    gateway_router,
     messages: list[dict[str, Any]],
     tools: list[dict[str, Any]] | None = None,
     tool_executor: ToolExecutor | None = None,
     temperature: float = 0.7,
     max_turns: int = 10,
+    max_tokens: int = 4096,
+    response_format: dict[str, Any] | None = None,
     stream: bool = True,
 ) -> None:
     """
@@ -132,7 +101,7 @@ async def agent_loop(
     logger.info(
         "agent_loop.start",
         run_id=run_id,
-        model=model.model_name,
+        model=run_state.model,
         message_count=len(messages),
         has_tools=tools is not None,
         max_turns=max_turns,
@@ -154,20 +123,22 @@ async def agent_loop(
                 message_count=len(messages),
             )
 
-            # ---- 调用模型（带重试）----
+            # Gateway 统一处理模型候选 fallback；此处仅负责 Run 生命周期与事件落盘。
             text_parts: list[str] = []
             tool_calls: list[ToolCallChunk] = []
             finish_reason = "stop"
             input_tokens = 0
             output_tokens = 0
-
             try:
                 text_parts, tool_calls, finish_reason, input_tokens, output_tokens, ttft_ms = (
-                    await _call_model_with_retry(
-                        model=model,
+                    await _call_model_via_gateway(
+                        gateway_router=gateway_router,
+                        logical_model=run_state.model,
                         messages=messages,
                         tools=tools,
                         temperature=temperature,
+                        max_tokens=max_tokens,
+                        response_format=response_format,
                         run_state=run_state,
                         turn=turn,
                         stream=stream,
@@ -195,8 +166,8 @@ async def agent_loop(
                 await db_service.update_run_status(run_id, "rate_limited", total_turns=turn, error=error_msg)
                 return
             except Exception as e:
-                # 所有重试耗尽后仍然失败
-                error_msg = f"LLM call failed after {settings.LLM_MAX_RETRIES} retries: {type(e).__name__}: {e}"
+                # Gateway 已耗尽允许的候选或遇到不可恢复错误。
+                error_msg = f"Gateway model call failed: {type(e).__name__}: {e}"
                 logger.error(
                     "agent_loop.llm_call_exhausted",
                     run_id=run_id,
@@ -417,158 +388,71 @@ async def agent_loop(
 
 
 # ============================================================
-# 带重试的 LLM 调用
+# Gateway 驱动的 LLM 调用
 # ============================================================
 
-async def _call_model_with_retry(
-    model: StreamingModel,
+async def _call_model_via_gateway(
+    gateway_router: GatewayExecutionPort,
+    logical_model: str,
     messages: list[dict],
     tools: list[dict] | None,
     temperature: float,
+    max_tokens: int,
+    response_format: dict[str, Any] | None,
     run_state: RunState,
     turn: int,
     stream: bool = True,
 ) -> tuple[list[str], list[ToolCallChunk], str, int, int, int | None]:
+    """通过进程内 Gateway 执行一次 Agent Turn。
+
+    GatewayModelRouter 已负责能力路由、熔断和安全 fallback，Agent Loop 不再做
+    上游重试，避免流式首输出后重放造成重复文本。
     """
-    带重试机制的模型调用
+    model_key = logical_model
+    try:
+        text_parts: list[str] = []
+        tool_calls: list[ToolCallChunk] = []
+        finish_reason = "stop"
+        input_tokens = 0
+        output_tokens = 0
+        call_start = time.time()
+        first_token_time: float | None = None
+        call = GatewayModelCall(messages=messages, tools=tools, temperature=temperature, max_tokens=max_tokens, response_format=response_format)
 
-    Args:
-        stream: True 使用流式（逐 chunk 推事件），False 使用非流式（一次性返回）
+        if stream:
+            async for event in gateway_router.stream(logical_model, call):
+                if isinstance(event, GatewayTextDelta):
+                    if first_token_time is None:
+                        first_token_time = time.time()
+                    text_parts.append(event.content)
+                    run_state.append_event(EventType.TEXT_DELTA, {"content": event.content, "turn": turn})
+                elif isinstance(event, GatewayToolCallEvent):
+                    if first_token_time is None:
+                        first_token_time = time.time()
+                    tool_calls.append(ToolCallChunk(id=event.tool_call.id, name=event.tool_call.name, arguments=event.tool_call.arguments))
+                elif isinstance(event, GatewayCompletedEvent):
+                    finish_reason = event.finish_reason
+                    input_tokens = event.usage.input_tokens
+                    output_tokens = event.usage.output_tokens
+        else:
+            result = await gateway_router.complete(logical_model, call)
+            if result.content:
+                text_parts.append(result.content)
+                run_state.append_event(EventType.TEXT_DELTA, {"content": result.content, "turn": turn})
+            tool_calls = [ToolCallChunk(id=tool.id, name=tool.name, arguments=tool.arguments) for tool in result.tool_calls]
+            finish_reason = result.finish_reason
+            input_tokens = result.usage.input_tokens
+            output_tokens = result.usage.output_tokens
 
-    Returns:
-        (text_parts, tool_calls, finish_reason, input_tokens, output_tokens, ttft_ms)
-        ttft_ms: 首 token 延迟（毫秒），仅流式模式有值，非流式为 None
-    """
-    attempt = 0
-    last_exception = None
-    model_key = model.model_name
-
-    while attempt < settings.LLM_MAX_RETRIES:
-        attempt += 1
-        try:
-            # ---- 限流：请求前获取 RPM 配额 ----
-            waited = await rate_limiter.acquire_request(model_key)
-            if waited > 0:
-                logger.info(
-                    "agent_loop.rate_limit_waited",
-                    run_id=run_state.run_id,
-                    model=model_key,
-                    waited_ms=round(waited * 1000),
-                )
-
-            text_parts: list[str] = []
-            tool_calls: list[ToolCallChunk] = []
-            finish_reason = "stop"
-            input_tokens = 0
-            output_tokens = 0
-
-            call_start = time.time()
-            first_token_time: float | None = None
-
-            if stream:
-                # ---- 流式调用 ----
-                async for chunk in model.stream(
-                    messages=messages,
-                    tools=tools,
-                    temperature=temperature,
-                ):
-                    if isinstance(chunk, TextChunk):
-                        if first_token_time is None:
-                            first_token_time = time.time()
-                        text_parts.append(chunk.content)
-                        run_state.append_event(EventType.TEXT_DELTA, {
-                            "content": chunk.content,
-                            "turn": turn,
-                        })
-                    elif isinstance(chunk, ToolCallChunk):
-                        if first_token_time is None:
-                            first_token_time = time.time()
-                        tool_calls.append(chunk)
-                    elif isinstance(chunk, StreamDone):
-                        finish_reason = chunk.finish_reason
-                        input_tokens = chunk.input_tokens
-                        output_tokens = chunk.output_tokens
-            else:
-                # ---- 非流式调用 ----
-                from app.models.streaming import CompletionResult
-                result: CompletionResult = await model.complete(
-                    messages=messages,
-                    tools=tools,
-                    temperature=temperature,
-                )
-                if result.content:
-                    text_parts.append(result.content)
-                    # 非流式也发一个 text_delta 事件（完整内容一次性推送）
-                    run_state.append_event(EventType.TEXT_DELTA, {
-                        "content": result.content,
-                        "turn": turn,
-                    })
-                tool_calls = result.tool_calls
-                finish_reason = result.finish_reason
-                input_tokens = result.input_tokens
-                output_tokens = result.output_tokens
-
-            call_duration = time.time() - call_start
-            ttft_ms = round((first_token_time - call_start) * 1000) if first_token_time else None
-
-            logger.debug(
-                "agent_loop.llm_call_success",
-                run_id=run_state.run_id,
-                turn=turn,
-                attempt=attempt,
-                stream=stream,
-                duration_ms=round(call_duration * 1000),
-                ttft_ms=ttft_ms,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-            )
-
-            # ---- 限流：请求后记录 token 用量（TPM，非阻塞）----
-            total_tokens = input_tokens + output_tokens
-            if total_tokens > 0:
-                rate_limiter.report_tokens(model_key, total_tokens)
-
-            return text_parts, tool_calls, finish_reason, input_tokens, output_tokens, ttft_ms
-
-        except RETRIABLE_EXCEPTIONS as e:
-            last_exception = e
-            wait_time = settings.LLM_RETRY_DELAY * (2 ** (attempt - 1))  # 指数退避
-
-            logger.warning(
-                "agent_loop.llm_retry",
-                run_id=run_state.run_id,
-                turn=turn,
-                attempt=attempt,
-                max_attempts=settings.LLM_MAX_RETRIES,
-                error_type=type(e).__name__,
-                error_msg=str(e),
-                wait_seconds=wait_time,
-            )
-
-            if attempt < settings.LLM_MAX_RETRIES:
-                await asyncio.sleep(wait_time)
-            else:
-                raise
-
-        except RateLimitExceeded:
-            # 我方限流器超时，不重试直接向上抛
-            raise
-
-        except Exception as e:
-            # 不可重试的异常直接抛出
-            logger.error(
-                "agent_loop.llm_call_non_retriable",
-                run_id=run_state.run_id,
-                turn=turn,
-                attempt=attempt,
-                error_type=type(e).__name__,
-                error_msg=str(e),
-            )
-            raise
-
-    # 理论上不会到这里，但防御性编程
-    raise last_exception or RuntimeError("LLM call failed with unknown error")
-
+        call_duration = time.time() - call_start
+        ttft_ms = round((first_token_time - call_start) * 1000) if first_token_time else None
+        logger.debug("agent_loop.llm_call_success", run_id=run_state.run_id, turn=turn, stream=stream, duration_ms=round(call_duration * 1000), ttft_ms=ttft_ms, input_tokens=input_tokens, output_tokens=output_tokens)
+        return text_parts, tool_calls, finish_reason, input_tokens, output_tokens, ttft_ms
+    except RateLimitExceeded:
+        raise
+    except Exception as exc:
+        logger.error("agent_loop.gateway_call_failed", run_id=run_state.run_id, turn=turn, model=logical_model, error_type=type(exc).__name__)
+        raise
 
 # ============================================================
 # 带重试的工具执行

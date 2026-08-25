@@ -185,6 +185,7 @@ class GatewayError(BaseModel):
     code: Literal[
         "invalid_request",
         "invalid_model",
+        "rate_limited",
         "capability_unavailable",
         "structured_output_schema_invalid",
         "structured_output_invalid",

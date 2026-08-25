@@ -44,6 +44,11 @@ class CreateRunRequest(BaseModel):
     max_turns: int = Field(default=10, ge=1, le=50, description="最大轮次（防无限循环）")
     system: str | None = Field(default=None, description="系统提示词（仅新建时生效）")
     stream: bool = Field(default=True, description="是否流式输出（False 时同步等待完整结果返回）")
+    max_tokens: int = Field(default=4096, gt=0, description="单次模型调用的最大输出 token")
+    response_format: dict[str, Any] | None = Field(
+        default=None,
+        description="可选结构化输出：json_object 或 json_schema",
+    )
 
 
 # ============================================================

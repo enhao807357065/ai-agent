@@ -335,11 +335,31 @@ Client → GET /v1/runs/{id}/stream → SSE 订阅事件流
                                    → text.delta / tool.calling / tool.result / run.completed
 
 Agent Loop（每轮 Turn）:
-    1. 调用 LLM（流式，支持指数退避重试）
-    2. 若有 tool_calls → 执行工具 → 结果追加到 messages
-    3. 保存 checkpoint 到 MySQL
-    4. 若 finish_reason=stop → 结束
+    1. 在进程内调用 GatewayModelRouter（逻辑模型 → 能力/优先级/成本/健康路由）
+    2. Router 处理 Circuit Breaker 与首个有效输出前的候选 fallback
+    3. 若有 tool_calls → 执行工具 → 结果追加到 messages
+    4. 保存 checkpoint 到 MySQL
+    5. 若 finish_reason=stop → 结束
+
+> `/v1/runs` 不通过 `localhost` HTTP 调用 Gateway endpoint。`routes.py` 与
+> `gateway.py` 是两个外部入口，二者在进程内复用 `GatewayModelRouter`：前者把
+> Gateway 标准事件转换为可持久化、可重连的 `RunEvent`，后者编码为 Gateway HTTP/SSE 契约。
+>
+> Run 中保存的 `model` 是逻辑模型名（如 `chat-default`），而不是 provider 或真实上游模型名。
+> 每个 Agent Turn 都会按最新的 target 健康状态重新选择候选；这使熔断能够跨 Turn 生效。
 ```
+
+### Run 的模型调用参数
+
+| 字段 | 类型 | 默认值 | 说明 |
+|---|---|---:|---|
+| `model` | `string` | `chat-default` | Gateway 逻辑模型名 |
+| `max_tokens` | `int` | `4096` | 单次 Agent Turn 的最大输出 token |
+| `response_format` | `object` | `null` | 可选 Gateway `json_object` / `json_schema` 结构化输出 |
+
+`response_format.type=json_schema` 时，Gateway 会先校验 Schema，随后在模型输出完成时执行本地 JSON Schema 校验。流式 Run 的文本 delta 可能先发送；只有最终 `run.completed` 才表示该 Turn 的结构化输出通过验证，失败会以 `run.failed` 结束，不应执行或持久化该次结构化结果。由于 schema 约束的是最终文本，`json_schema` 不能和 Agent `tools` 同时使用。
+
+---
 
 ### 分层设计
 
@@ -359,6 +379,7 @@ Agent Loop（每轮 Turn）:
 - **MySQL**：管历史记录（Run/Messages/Checkpoints），服务重启后可恢复
 - **读取策略**：内存优先，fallback DB
 - **设计原则**：不使用数据库外键约束，关联关系仅在 ORM 层声明
+- **模型限流**：按 Gateway **逻辑模型名**独立维护 RPM/TPM 滑动窗口；Gateway HTTP 与每个 Agent Turn 共用同一限流器。
 
 ---
 

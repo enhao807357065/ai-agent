@@ -45,6 +45,8 @@ class RunState:
         self.tools: list[dict] | None = None
         self.temperature: float = 0.7
         self.max_turns: int = 10
+        self.max_tokens: int = 4096
+        self.response_format: dict[str, Any] | None = None
 
         # 事件历史（有序）
         self.events: list[RunEvent] = []

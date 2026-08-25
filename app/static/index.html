@@ -372,7 +372,9 @@
                 </div>
                 <div class="settings-bar">
                     <label>模型:</label>
-                    <input id="modelInput" type="text" value="deepseek-v4-pro" style="width:140px">
+                    <select id="modelSelect" style="width:160px" aria-label="逻辑模型">
+                        <option value="">加载逻辑模型中...</option>
+                    </select>
                     <label>System Prompt:</label>
                     <select id="systemSelect" style="width:180px" onchange="onSystemPromptChange()">
                         <option value="">加载中...</option>
@@ -453,7 +455,10 @@
                 const stateResp = await fetch(`${API_BASE}/runs/${runId}`);
                 if (stateResp.ok) {
                     const state = await stateResp.json();
-                    // 不精确，但继续对话时会从 POST 响应获取
+                    const modelSelect = document.getElementById('modelSelect');
+                    if ([...modelSelect.options].some(option => option.value === state.model)) {
+                        modelSelect.value = state.model;
+                    }
                 }
 
                 updateSessionList();
@@ -485,7 +490,7 @@
             const useStream = document.getElementById('streamToggle').value === 'true';
             const body = {
                 messages: [{ role: 'user', content: text }],
-                model: document.getElementById('modelInput').value,
+                model: document.getElementById('modelSelect').value,
                 temperature: parseFloat(document.getElementById('tempInput').value),
                 stream: useStream,
             };
@@ -745,8 +750,26 @@
         }
 
         // ============================================================
-        // Init: load existing sessions + system prompts
+        // Init: load logical models, existing sessions + system prompts
         // ============================================================
+        async function loadLogicalModels() {
+            const select = document.getElementById('modelSelect');
+            try {
+                const resp = await fetch(`${API_BASE}/models`);
+                if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+                const data = await resp.json();
+                const models = data.data || [];
+                if (!models.length) throw new Error('No logical models configured');
+                select.innerHTML = models.map(model =>
+                    `<option value="${escapeHtml(model.id)}">${escapeHtml(model.id)}</option>`
+                ).join('');
+            } catch (e) {
+                console.error('Failed to load logical models:', e);
+                select.innerHTML = '<option value="" disabled selected>无法加载逻辑模型</option>';
+                select.disabled = true;
+            }
+        }
+
         async function loadSystemPrompts() {
             try {
                 const resp = await fetch(`${API_BASE}/system-prompts`);
@@ -810,6 +833,7 @@
         async function init() {
             // 并行加载 sessions 和 system prompts
             await Promise.all([
+                loadLogicalModels(),
                 loadSystemPrompts(),
                 (async () => {
                     try {

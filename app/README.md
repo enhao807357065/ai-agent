@@ -324,9 +324,10 @@ curl -N http://localhost:8000/v1/runs/{run_id}/stream?last_event_id=15
 | `DEEPSEEK_ENABLE_THINKING` | 是否开启思维链 | `false` |
 | `DEEPSEEK_THINKING_BUDGET` | 思维链最大 token 数 | `10000` |
 | `DEEPSEEK_REASONING_EFFORT` | 推理努力级别 | `medium` |
-| `LLM_MAX_RETRIES` | LLM 调用最大重试次数 | `3` |
-| `LLM_RETRY_DELAY` | 重试基础延迟（秒，指数退避） | `1.0` |
-| `MODEL_RATE_LIMITS` | 模型限流配置（JSON，见下方说明） | 见默认值 |
+| `LLM_MAX_RETRIES` | 兼容配置；上游 fallback 由 Gateway Router 管理 | `3` |
+| `LLM_RETRY_DELAY` | 兼容配置 | `1.0` |
+| `RATE_LIMIT_ENABLED` | 是否启用 Gateway 逻辑模型限流；`false` 时完全 no-op | `true` |
+| `MODEL_RATE_LIMITS` | Gateway 逻辑模型限流配置（JSON，见下方说明） | 见默认值 |
 | `DB_HOST` | MySQL 主机 | `127.0.0.1` |
 | `DB_PORT` | MySQL 端口 | `3306` |
 | `DB_USER` | MySQL 用户 | `root` |
@@ -340,10 +341,16 @@ curl -N http://localhost:8000/v1/runs/{run_id}/stream?last_event_id=15
 
 ### 配置方式
 
-通过 `MODEL_RATE_LIMITS` 环境变量传入 JSON，为每个模型设置独立的限流参数：
+通过 `RATE_LIMIT_ENABLED` 控制是否启用：默认 `true`。设为 `false` 时，Gateway HTTP 与 Agent Loop 的调用仍走同一个 Router，但限流器是完全无副作用的 no-op——不创建滑动窗口、不等待、也不记录 token。
 
 ```env
-MODEL_RATE_LIMITS={"deepseek-reasoner":{"rpm":60,"tpm":100000},"deepseek-v4-pro":{"rpm":120,"tpm":200000,"max_wait":90}}
+RATE_LIMIT_ENABLED=false
+```
+
+启用后，通过 `MODEL_RATE_LIMITS` 环境变量传入 JSON，为每个**Gateway 逻辑模型**设置独立的限流参数：
+
+```env
+MODEL_RATE_LIMITS={"chat-default":{"rpm":60,"tpm":100000},"chat-fast":{"rpm":120,"tpm":200000,"max_wait":90}}
 ```
 
 | 字段 | 类型 | 说明 | 默认值 |
@@ -352,7 +359,7 @@ MODEL_RATE_LIMITS={"deepseek-reasoner":{"rpm":60,"tpm":100000},"deepseek-v4-pro"
 | `tpm` | int | 每分钟最大 token 数（input + output 合计） | `100000` |
 | `max_wait` | float | 限流排队最大等待秒数，超时返回错误 | `60.0` |
 
-> key 必须与实际调用时的 `model_name` 完全匹配（即 `DEEPSEEK_MODEL` 或 `LLM_MODEL` 配置的值）。
+> key 必须与 `GATEWAY_ROUTING_POLICIES` 中的逻辑模型名完全匹配；同一逻辑模型的 Gateway HTTP 调用与 Agent Loop 每一个 Turn 共用同一限流窗口。
 
 ### 工作原理
 
@@ -365,8 +372,8 @@ MODEL_RATE_LIMITS={"deepseek-reasoner":{"rpm":60,"tpm":100000},"deepseek-v4-pro"
 │        窗口2 [30-90s]   │
 ```
 
-- **RPM 控制**：每次 LLM 调用前 `acquire_request()` 消耗 1 配额
-- **TPM 控制**：LLM 调用完成后 `report_tokens(input + output)` 消耗对应配额
+- **RPM 控制**：每次 Gateway Router 出网调用前 `acquire_request()` 消耗 1 配额
+- **TPM 控制**：Gateway Router 得到最终 usage 后 `report_tokens(input + output)` 消耗对应配额
 - 窗口已满时自动 sleep 等待最早记录过期（不浪费重试次数）
 - 等待超过 `max_wait` 秒抛出 `RateLimitExceeded` 异常
 
@@ -377,21 +384,26 @@ MODEL_RATE_LIMITS={"deepseek-reasoner":{"rpm":60,"tpm":100000},"deepseek-v4-pro"
 curl http://localhost:8000/v1/rate-limits
 
 # 查看指定模型
-curl http://localhost:8000/v1/rate-limits/deepseek-reasoner
+curl http://localhost:8000/v1/rate-limits/chat-default
 ```
 
 **响应示例：**
 ```json
 {
-  "deepseek-reasoner": {
-    "configured": true,
-    "rpm": {"usage": 12, "limit": 60},
-    "tpm": {"usage": 45200, "limit": 100000}
-  },
-  "deepseek-v4-pro": {
-    "configured": true,
-    "rpm": {"usage": 3, "limit": 120},
-    "tpm": {"usage": 8900, "limit": 200000}
+  "enabled": true,
+  "models": {
+    "chat-default": {
+      "enabled": true,
+      "configured": true,
+      "rpm": {"usage": 12, "limit": 60},
+      "tpm": {"usage": 45200, "limit": 100000}
+    },
+    "chat-fast": {
+      "enabled": true,
+      "configured": true,
+      "rpm": {"usage": 3, "limit": 120},
+      "tpm": {"usage": 8900, "limit": 200000}
+    }
   }
 }
 ```

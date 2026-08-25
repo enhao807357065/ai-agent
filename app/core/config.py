@@ -153,11 +153,15 @@ class Settings:
     LLM_MAX_RETRIES: int = int(os.getenv("LLM_MAX_RETRIES", "3"))
     LLM_RETRY_DELAY: float = float(os.getenv("LLM_RETRY_DELAY", "1.0"))
 
-    # 模型限流配置（JSON 格式，按模型名设置 RPM/TPM）
-    # 格式: {"model_name": {"rpm": 60, "tpm": 100000, "max_wait": 60}}
+    # Gateway 逻辑模型限流开关。关闭时限流器完全 no-op：不等待、不记账、不创建窗口。
+    RATE_LIMIT_ENABLED: bool = os.getenv("RATE_LIMIT_ENABLED", "true").lower() == "true"
+
+    # Gateway 逻辑模型限流配置（JSON 格式，作用于 Gateway HTTP 与每个 Agent Turn）
+    # 格式: {"logical_model": {"rpm": 60, "tpm": 100000, "max_wait": 60}}
     MODEL_RATE_LIMITS: str = os.getenv("MODEL_RATE_LIMITS", json.dumps({
-        "deepseek-v4-flash": {"rpm": 60, "tpm": 100000},
-        "deepseek-v4-pro": {"rpm": 120, "tpm": 200000},
+        "chat-default": {"rpm": 60, "tpm": 100000},
+        "chat-fast": {"rpm": 120, "tpm": 200000},
+        "reasoning-pro": {"rpm": 30, "tpm": 100000},
     }))
 
 

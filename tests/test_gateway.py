@@ -38,6 +38,7 @@ from app.services.gateway_structured_output_validator import (
     GatewayStructuredOutputSchemaError,
 )
 from app.services.gateway_model_router import GatewayModelRouter, GatewayUpstreamUnavailable
+from app.services.rate_limiter import RateLimitExceeded
 from app.services.target_health_registry import TargetHealthRegistry
 
 
@@ -250,6 +251,41 @@ def selector_for(targets: dict[str, TargetProfile], policy: RoutingPolicy, healt
         {"chat-default": policy},
         health or TargetHealthRegistry(failure_threshold=2, open_seconds=60),
     )
+
+
+class RecordingLimiter:
+    def __init__(self) -> None:
+        self.acquired: list[str] = []
+        self.reported: list[tuple[str, int]] = []
+
+    async def acquire_request(self, model: str) -> float:
+        self.acquired.append(model)
+        return 0.0
+
+    def report_tokens(self, model: str, tokens: int) -> None:
+        self.reported.append((model, tokens))
+
+
+def test_gateway_router_applies_logical_model_rate_limit(monkeypatch):
+    import app.services.gateway_model_router as router_module
+
+    targets = {
+        "talai/primary": TargetProfile(
+            id="talai/primary", provider="talai", model="primary",
+            capabilities={ModelCapability.CHAT}, priority=10,
+        ),
+    }
+    limiter = RecordingLimiter()
+    monkeypatch.setattr(router_module, "create_model_for_target", lambda _: FakeModel())
+
+    result = asyncio.run(GatewayModelRouter(
+        selector_for(targets, RoutingPolicy(target_ids=["talai/primary"])),
+        limiter=limiter,
+    ).complete("chat-default", GatewayModelCall(messages=[{"role": "user", "content": "hi"}])))
+
+    assert result.content == "hello"
+    assert limiter.acquired == ["chat-default"]
+    assert limiter.reported == [("chat-default", 5)]
 
 
 def test_complete_falls_back_to_next_target(monkeypatch):

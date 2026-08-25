@@ -28,6 +28,7 @@ from fastapi.responses import StreamingResponse, JSONResponse
 from app.core.config import settings
 from app.core.system_prompts import list_versions, get_version, get_default_version, render_prompt
 from app.models.events import EventType
+from app.models.gateway import GatewayModelCall
 from app.models.schemas import (
     CreateRunRequest,
     RunInfo,
@@ -38,7 +39,11 @@ from app.services.run_store import run_store, RunState
 from app.services.agent_loop import agent_loop
 from app.services.db_service import db_service
 from app.services.rate_limiter import RateLimitExceeded
-from app.adapters import create_model
+from app.services.gateway_model_router import gateway_model_router
+from app.services.gateway_structured_output_validator import (
+    GatewayStructuredOutputSchemaError,
+    json_schema_from_call,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -46,12 +51,14 @@ router = APIRouter(prefix="/v1")
 
 
 # ============================================================
-# 模型工厂（委托给 adapters 包的 create_model）
+# Run API 使用 GatewayModelRouter（逻辑模型、能力路由、熔断与结构化输出）
 # ============================================================
 
-def _create_model(model_name: str | None = None):
-    """创建模型实例（根据 LLM_PROVIDER 环境变量自动选择 adapter）"""
-    return create_model(model_name)
+def _resolve_logical_model(model_name: str | None) -> str:
+    """校验并返回 Run 对外保存的逻辑模型名。"""
+    logical_model = model_name or "chat-default"
+    gateway_model_router.resolve(logical_model)
+    return logical_model
 
 
 # ============================================================
@@ -83,7 +90,23 @@ async def create_run(req: CreateRunRequest):
     - 不传 run_id → 新建会话，返回新 run_id
     - 传 run_id → 在已有会话上追加消息并继续执行 agent loop
     """
-    model_name = req.model or settings.LLM_MODEL
+    logical_model = _resolve_logical_model(req.model)
+    if req.tools and (req.response_format or {}).get("type") == "json_schema":
+        raise HTTPException(
+            status_code=422,
+            detail="json_schema response_format cannot be combined with Agent tools",
+        )
+    # 在创建 Run、写入 DB 前完成 json_schema 输入校验，避免非法请求留下半成品状态。
+    try:
+        json_schema_from_call(GatewayModelCall(
+            messages=[message.model_dump(exclude_none=True) for message in req.messages],
+            tools=None,
+            temperature=req.temperature,
+            max_tokens=req.max_tokens,
+            response_format=req.response_format,
+        ))
+    except GatewayStructuredOutputSchemaError as exc:
+        raise HTTPException(status_code=422, detail="Invalid json_schema response_format") from exc
     request_time = time.time()
 
     # ---- 新建 or 继续 ----
@@ -101,6 +124,9 @@ async def create_run(req: CreateRunRequest):
             )
 
         run_id = req.run_id
+        # 未显式选择模型时继续沿用当前 Run；显式选择才切换为新的逻辑模型。
+        if req.model is None:
+            logical_model = _resolve_logical_model(state.model)
 
         # 追加用户新消息到对话历史
         msg_start_seq = len(state.messages)
@@ -134,6 +160,20 @@ async def create_run(req: CreateRunRequest):
         state.error = None
         state.temperature = req.temperature
         state.max_turns = req.max_turns
+        state.max_tokens = req.max_tokens
+        state.response_format = req.response_format
+        # 同一 Run 可以在任意后续 Turn 切换逻辑模型；历史消息保持不变，
+        # 仅影响本次及以后通过 Gateway 发起的模型调用。
+        state.model = logical_model
+        # Run 记录保存当前选择的逻辑模型；消息历史仍复用同一会话。
+        await db_service.save_run(
+            run_id=run_id,
+            model=state.model,
+            status="created",
+            temperature=state.temperature,
+            max_turns=state.max_turns,
+            tools=state.tools,
+        )
 
         logger.info(
             "api.run_continue",
@@ -145,7 +185,7 @@ async def create_run(req: CreateRunRequest):
     else:
         # 新建会话
         run_id = str(uuid.uuid4())
-        state = run_store.create(run_id=run_id, model=model_name, system=req.system)
+        state = run_store.create(run_id=run_id, model=logical_model, system=req.system)
 
         # 追加用户消息
         for msg in req.messages:
@@ -170,11 +210,13 @@ async def create_run(req: CreateRunRequest):
 
         state.temperature = req.temperature
         state.max_turns = req.max_turns
+        state.max_tokens = req.max_tokens
+        state.response_format = req.response_format
 
         # ---- 持久化到数据库 ----
         await db_service.save_run(
             run_id=run_id,
-            model=model_name,
+            model=logical_model,
             status="created",
             system_prompt=req.system,
             temperature=req.temperature,
@@ -186,29 +228,30 @@ async def create_run(req: CreateRunRequest):
         logger.info(
             "api.run_created",
             run_id=run_id,
-            model=model_name,
+            model=logical_model,
             message_count=len(state.messages),
             has_tools=bool(req.tools),
             request_duration_ms=round((time.time() - request_time) * 1000),
         )
 
     # ---- 发射 created 事件 ----
-    state.append_event(EventType.RUN_CREATED, {"model": model_name})
+    state.append_event(EventType.RUN_CREATED, {"model": logical_model})
 
-    # ---- 创建模型实例 & 启动 agent loop ----
-    model = _create_model(model_name)
+    # Agent Loop 在进程内直接调用 GatewayModelRouter；不发 localhost HTTP。
 
     if req.stream:
         # 流式模式：后台启动 agent loop，客户端通过 SSE 订阅
         task = asyncio.create_task(
             agent_loop(
                 run_state=state,
-                model=model,
+                gateway_router=gateway_model_router,
                 messages=state.messages,
                 tools=state.tools,
                 tool_executor=_demo_tool_executor if state.tools else None,
                 temperature=state.temperature,
                 max_turns=state.max_turns,
+                max_tokens=state.max_tokens,
+                response_format=state.response_format,
                 stream=True,
             )
         )
@@ -219,12 +262,14 @@ async def create_run(req: CreateRunRequest):
         # 非流式模式：同步等待完整结果返回
         await agent_loop(
             run_state=state,
-            model=model,
+            gateway_router=gateway_model_router,
             messages=state.messages,
             tools=state.tools,
             tool_executor=_demo_tool_executor if state.tools else None,
             temperature=state.temperature,
             max_turns=state.max_turns,
+            max_tokens=state.max_tokens,
+            response_format=state.response_format,
             stream=False,
         )
 
@@ -479,16 +524,20 @@ async def resume_run(run_id: str):
     # 发射事件 & 启动 agent loop
     state.append_event(EventType.RUN_CREATED, {"model": run_record.model, "resumed": True})
 
-    model = _create_model(run_record.model)
+    # 已保存的 model 现在应是逻辑模型；旧历史记录若不是逻辑模型会明确失败，避免悄悄走默认 provider。
+    _resolve_logical_model(run_record.model)
     task = asyncio.create_task(
         agent_loop(
             run_state=state,
-            model=model,
+            gateway_router=gateway_model_router,
             messages=state.messages,
             tools=state.tools,
             tool_executor=_demo_tool_executor if state.tools else None,
             temperature=state.temperature,
             max_turns=state.max_turns,
+            max_tokens=state.max_tokens,
+            response_format=state.response_format,
+            stream=True,
         )
     )
     state.task = task

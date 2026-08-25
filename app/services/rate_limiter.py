@@ -20,6 +20,8 @@ from dataclasses import dataclass
 
 import structlog
 
+from app.core.config import settings
+
 logger = structlog.get_logger(__name__)
 
 
@@ -151,29 +153,37 @@ class SlidingWindowLimiter:
 
 class ModelRateLimiter:
     """
-    为每个模型维护独立的 RPM + TPM 限流器。
+    为每个逻辑模型维护独立的 RPM + TPM 限流器。
 
     Usage:
-        rate_limiter.configure("deepseek-reasoner", ModelRateLimit(rpm=60, tpm=100000))
+        rate_limiter.configure("chat-default", ModelRateLimit(rpm=60, tpm=100000))
 
-        await rate_limiter.acquire_request("deepseek-reasoner")
-        # ... 调用模型 ...
-        await rate_limiter.report_tokens("deepseek-reasoner", input_tokens + output_tokens)
+        await rate_limiter.acquire_request("chat-default")
+        # ... 调用 Gateway Router ...
+        rate_limiter.report_tokens("chat-default", input_tokens + output_tokens)
     """
 
-    def __init__(self):
+    def __init__(self, enabled: bool | None = None):
+        # ``None`` 绑定全局配置；显式传值主要用于测试或独立嵌入。
+        self._enabled = settings.RATE_LIMIT_ENABLED if enabled is None else enabled
         self._limiters: dict[str, tuple[SlidingWindowLimiter, SlidingWindowLimiter]] = {}
         self._configs: dict[str, ModelRateLimit] = {}
 
+    @property
+    def enabled(self) -> bool:
+        return self._enabled
+
     def configure(self, model_key: str, config: ModelRateLimit) -> None:
-        """注册/更新模型限流配置"""
+        """注册/更新模型限流配置；关闭时只保留配置，不创建滑动窗口。"""
         self._configs[model_key] = config
-        self._limiters[model_key] = (
-            SlidingWindowLimiter(config.rpm, 60.0),    # RPM 窗口
-            SlidingWindowLimiter(config.tpm, 60.0),    # TPM 窗口
-        )
+        if self._enabled:
+            self._limiters[model_key] = (
+                SlidingWindowLimiter(config.rpm, 60.0),    # RPM 窗口
+                SlidingWindowLimiter(config.tpm, 60.0),    # TPM 窗口
+            )
         logger.info(
             "rate_limiter.configured",
+            enabled=self._enabled,
             model=model_key,
             rpm=config.rpm,
             tpm=config.tpm,
@@ -194,12 +204,17 @@ class ModelRateLimiter:
         """
         请求前调用：消耗 1 RPM 配额，同时检查 TPM 窗口是否过载。
 
+        限流关闭时为无副作用 no-op：不创建窗口、不等待、不抛异常。
+
         Returns:
             实际等待的秒数（0 表示未等待）
 
         Raises:
             RateLimitExceeded: 等待超时
         """
+        if not self._enabled:
+            return 0.0
+
         config, rpm_limiter, tpm_limiter = self._get_or_create(model_key)
         total_waited = 0.0
 
@@ -241,7 +256,7 @@ class ModelRateLimiter:
         非阻塞 —— token 已经消耗了，无法退回。
         记录后，下一次 acquire_request 会检查 TPM 窗口并自然限速。
         """
-        if tokens <= 0:
+        if not self._enabled or tokens <= 0:
             return
 
         _, _, tpm_limiter = self._get_or_create(model_key)
@@ -254,20 +269,26 @@ class ModelRateLimiter:
 
     def get_status(self, model_key: str) -> dict:
         """获取模型限流状态（用于监控/调试接口）"""
+        if not self._enabled:
+            return {"enabled": False, "configured": model_key in self._configs}
         if model_key not in self._limiters:
-            return {"configured": False}
+            return {"enabled": True, "configured": False}
 
         config = self._configs[model_key]
         rpm_limiter, tpm_limiter = self._limiters[model_key]
         return {
+            "enabled": True,
             "configured": True,
             "rpm": {"usage": rpm_limiter.current_usage, "limit": config.rpm},
             "tpm": {"usage": tpm_limiter.current_usage, "limit": config.tpm},
         }
 
-    def get_all_status(self) -> dict[str, dict]:
-        """获取所有已配置模型的限流状态"""
-        return {key: self.get_status(key) for key in self._configs}
+    def get_all_status(self) -> dict:
+        """获取全局开关与所有已配置模型的限流状态"""
+        return {
+            "enabled": self._enabled,
+            "models": {key: self.get_status(key) for key in self._configs},
+        }
 
 
 # ============================================================

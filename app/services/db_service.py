@@ -45,7 +45,8 @@ class DBService:
             async with session.begin():
                 existing = await session.get(RunRecord, run_id)
                 if existing:
-                    # 只要对象是通过当前 session 查出来的（session.get / session.execute），直接改属性就等于 UPDATE，不需要手动调任何更新方法。
+                    # 继续会话可切换逻辑模型，因此同时更新持久化的逻辑模型名。
+                    existing.model = model
                     existing.status = status
                     existing.updated_at = time.time()
                     if tools is not None:

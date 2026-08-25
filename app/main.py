@@ -157,6 +157,7 @@ def create_app() -> FastAPI:
             rate_limiter.configure(model_key, ModelRateLimit(**cfg))
         structlog.get_logger().info(
             "rate_limiter.initialized",
+            enabled=settings.RATE_LIMIT_ENABLED,
             models=list(rate_limits.keys()),
             configs={k: {"rpm": v.get("rpm", 60), "tpm": v.get("tpm", 100000), "max_wait": v.get("max_wait", 60.0)} for k, v in rate_limits.items()},
         )

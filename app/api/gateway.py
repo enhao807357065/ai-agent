@@ -40,6 +40,7 @@ from app.services.gateway_structured_output_validator import (
     GatewayStructuredOutputSchemaError,
     json_schema_from_call,
 )
+from app.services.rate_limiter import RateLimitExceeded
 from app.services.gateway_model_router import (
     GatewayConfigurationError,
     GatewayRoutingError,
@@ -70,6 +71,12 @@ def _gateway_error(
     stream_started: bool = False,
 ) -> tuple[int, GatewayError]:
     """将领域/SDK 异常转换为稳定的公开错误码，绝不返回原始 provider 信息。"""
+    if isinstance(exc, RateLimitExceeded):
+        return 429, GatewayError(
+            code="rate_limited",
+            message="Gateway rate limit exceeded; retry later.",
+            retryable=True,
+        )
     if isinstance(exc, GatewayRoutingError):
         return 400, GatewayError(code="invalid_model", message=str(exc))
     if isinstance(exc, GatewayCapabilityUnavailable):

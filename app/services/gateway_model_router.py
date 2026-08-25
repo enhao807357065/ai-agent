@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import time
 from collections.abc import AsyncIterator
-from typing import Literal, cast
+from typing import Literal, Protocol, cast
 
 import structlog
 
@@ -37,6 +37,7 @@ from app.services.gateway_structured_output_validator import (
     validate_structured_output,
 )
 from app.services.target_health_registry import TargetHealthRegistry
+from app.services.rate_limiter import RateLimitExceeded, rate_limiter
 
 logger = structlog.get_logger(__name__)
 
@@ -85,10 +86,21 @@ class GatewayUpstreamRequestError(Exception):
     """上游拒绝请求（例如 400/401/403/422）；禁止 fallback。"""
 
 
+class GatewayRateLimiter(Protocol):
+    async def acquire_request(self, model_key: str) -> float: ...
+
+    def report_tokens(self, model_key: str, tokens: int) -> None: ...
+
+
 class GatewayModelRouter:
     """仅在能力兼容候选中，按 priority/cost/health 执行受限故障转移。"""
 
-    def __init__(self, selector: GatewayCandidateSelector | None = None) -> None:
+    def __init__(
+        self,
+        selector: GatewayCandidateSelector | None = None,
+        limiter: GatewayRateLimiter = rate_limiter,
+    ) -> None:
+        self._limiter = limiter
         self._health = TargetHealthRegistry(
             failure_threshold=settings.GATEWAY_CIRCUIT_FAILURE_THRESHOLD,
             open_seconds=settings.GATEWAY_CIRCUIT_OPEN_SECONDS,
@@ -161,6 +173,7 @@ class GatewayModelRouter:
         # 在请求出网前验证 schema 自身，避免把调用方契约错误伪装成 upstream 400。
         json_schema_from_call(call)
         name, candidates = self._candidates(logical_model, call, stream=False)
+        await self._limiter.acquire_request(name)
         errors: list[str] = []
 
         for attempt, candidate in enumerate(candidates, start=1):
@@ -171,6 +184,8 @@ class GatewayModelRouter:
                 completion = await model.complete(**call.model_dump())
                 validate_structured_output(completion.content, call)
                 self._health.record_success(candidate.profile.id, (time.perf_counter() - started) * 1000)
+                usage = GatewayUsage(input_tokens=completion.input_tokens, output_tokens=completion.output_tokens)
+                self._limiter.report_tokens(name, usage.total_tokens)
                 return GatewayModelResult(
                     route=self._route_info(name, candidate, attempt),
                     content=completion.content,
@@ -189,6 +204,7 @@ class GatewayModelRouter:
         """首个有效文本/工具输出前可换下一个能力兼容候选；之后绝不切换。"""
         json_schema_from_call(call)
         name, candidates = self._candidates(logical_model, call, stream=True)
+        await self._limiter.acquire_request(name)
         errors: list[str] = []
 
         for attempt, candidate in enumerate(candidates, start=1):
@@ -211,6 +227,8 @@ class GatewayModelRouter:
                     elif isinstance(chunk, StreamDone):
                         validate_structured_output("".join(text_parts), call)
                         self._health.record_success(candidate.profile.id, (time.perf_counter() - started) * 1000)
+                        usage = GatewayUsage(input_tokens=chunk.input_tokens, output_tokens=chunk.output_tokens)
+                        self._limiter.report_tokens(name, usage.total_tokens)
                         yield GatewayCompletedEvent(
                             finish_reason=cast(Literal["stop", "tool_calls", "length"], chunk.finish_reason),
                             usage=GatewayUsage(input_tokens=chunk.input_tokens, output_tokens=chunk.output_tokens),
