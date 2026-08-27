@@ -20,14 +20,34 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from jinja2 import Environment, BaseLoader, StrictUndefined, Template
+from jinja2 import BaseLoader, StrictUndefined, Template
+from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 
 # ============================================================
 # Jinja2 Environment 配置
 # ============================================================
 
-jinja_env = Environment(
+class PromptSandbox(ImmutableSandboxedEnvironment):
+    """Prompt 模板的最小权限 Jinja2 沙箱。
+
+    模板源码只来自本模块维护的 PromptVersion；用户输入、RAG 文档等外部内容
+    只能作为 render() 变量传入，绝不能传给 from_string() 作为模板源码。
+
+    此层防御的是 SSTI 和意外暴露上下文对象，不替代 LLM Prompt Injection 的
+    工具鉴权、数据隔离及输出校验。
+    """
+
+    def is_safe_attribute(self, obj: object, attr: str, value: object) -> bool:
+        """Prompt 不需要访问对象属性，默认全部拒绝。"""
+        return False
+
+    def is_safe_callable(self, obj: object) -> bool:
+        """Prompt 不需要调用上下文函数，默认全部拒绝。"""
+        return False
+
+
+jinja_env = PromptSandbox(
     loader=BaseLoader(),        # 从字符串加载，不需要文件系统
     undefined=StrictUndefined,  # 变量未定义 → 立即报错（不静默忽略）
     trim_blocks=True,           # 块标签后的第一个换行自动去掉
