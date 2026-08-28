@@ -313,6 +313,14 @@ ai-agent/
 │   ├── 1-3/                    # 流式服务（SSE）
 │   ├── 1-4/                    # Prompt 模板引擎
 │   └── 1-5/                    # 结构化输出与字段校验
+├── week02/                     # 第二周：Tool Runtime
+│   └── 2-1/                    # 类型化 Tool 定义、注册、消息契约与订单查询示例
+│       ├── execution_context.py
+│       ├── tool_definition.py
+│       ├── tool_runtime.py
+│       ├── tool_messages.py
+│       ├── order_schemas.py
+│       └── search_order_tool.py
 ├── docs/
 │   └── curl-examples.md        # 完整 API curl 请求示例
 ├── .env.example                # 环境变量模板
@@ -443,6 +451,70 @@ LLM_PROVIDER=deepseek_responses # DeepSeek Responses API
 | 1-3 | FastAPI SSE 流式推理 + EventSource 断开重连 |
 | 1-4 | Jinja2 Prompt 模板：StrictUndefined + SHA256 指纹 |
 | 1-5 | Pydantic model_validator 字段约束 + responses.parse |
+
+### week02/2-1 — 类型化 Tool Runtime
+
+这一节实现了一个独立的 Tool Runtime 学习骨架：把 LLM 的 Tool Calling 从“模型输出一段 JSON 后直接执行”拆为**工具声明、运行时上下文、注册表、消息契约和业务工具**五部分。
+
+```text
+LLM Tool Call（不可信 arguments_json）
+        │
+        ▼
+ToolRuntime.execute（待逐步实现）
+  ├── 从 registry 解析 ToolDefinition
+  ├── input_model.model_validate() 校验参数
+  ├── 检查 ExecutionContext 中的权限 / 租户 / 审批
+  ├── 执行 handler（timeout / retry / trace）
+  ├── output_model.model_validate() 验收结果
+  └── ToolResultMessage 序列化为模型可消费的 tool message
+```
+
+#### 目录与职责
+
+| 文件 | 职责 |
+|------|------|
+| `execution_context.py` | 服务端注入的可信身份上下文；`ToolInput` / `ToolOutput` 基类；统一 `ToolError` 和 `ToolResult` |
+| `tool_definition.py` | 不可变的 `ToolDefinition`：名称、说明、Pydantic 输入输出模型、handler、权限、风险、超时和重试等元数据 |
+| `tool_runtime.py` | Tool 注册表；`register()` 返回可幂等卸载的 `dispose()`；按调用者权限筛选可暴露给模型的工具 |
+| `tool_messages.py` | 严格校验模型 Tool Call，并将成功结果或安全错误转换为 `role="tool"` 消息 |
+| `order_schemas.py` | 订单查询的输入、输出 Pydantic 契约及跨字段校验 |
+| `search_order_tool.py` | `search_orders` 只读工具和 `DemoOrderService`；演示内部订单 DTO 到 Tool Output 的显式映射 |
+
+#### Pydantic 在 Tool 契约中的角色
+
+`BaseModel` 是内部契约的唯一事实来源；JSON Schema 只是把输入契约投影给不同模型厂商。
+
+| 方法 | 用途 |
+|------|------|
+| `input_model.model_json_schema()` | 生成 Function Calling 的 `parameters` JSON Schema，告诉模型允许传哪些参数 |
+| `input_model.model_validate(raw_arguments)` | 在服务端校验并解析 LLM 的不可信参数；拒绝未知字段、错误类型和不满足约束的值 |
+| `output_model.model_validate(raw_output)` | 验收 handler 返回的结果，阻止内部 DTO、额外字段或不符合对外契约的数据直接进入模型上下文 |
+| `output.model_dump_json()` | 把已验证的输出序列化为 Tool Message / HTTP 响应可用的 JSON 文本 |
+
+例如，`DemoOrderService` 的内部记录使用 `created_at`（带时区的 datetime 字符串）和 `amount_cents`；`search_orders` 必须显式将它映射为 `OrderSummary`。`ToolOutput(extra="forbid")` 会拒绝未声明字段，防止内部字段被静默丢弃或意外泄露。
+
+#### 权限边界
+
+`ExecutionContext` 必须由服务端可信身份系统创建，而不是来自 LLM 的 Tool arguments。当前示例中，单个 `ToolDefinition.permission` 表示工具要求的一条 capability，`ExecutionContext.permission` 是当前身份持有的 capability 集合：
+
+```python
+allowed = tool.permission in ctx.permission
+```
+
+`model_tools()` 仅负责隐藏当前身份无权调用的工具，以减少 token 和误调用；真正的 `execute()` 实现后仍必须复用同样的权限检查，不能因为模型看不到工具就跳过执行层鉴权。
+
+当前代码是单权限教学版本。演进到多权限工具时，可将字段改为 `required_permissions: frozenset[Permission]`，并用 `required_permissions.issubset(ctx.permissions)` 表达默认的 **ALL / AND** 语义。无论单权限还是多权限，`order:refund` 这类 scope 都只说明“具备退款动作能力”；实际执行仍要检查订单所属 tenant、订单状态、退款额度和高风险操作审批。
+
+#### 运行示例
+
+先安装项目依赖并配置 `.env`。当前 `search_order_tool.py` 会先运行本地订单 Tool 的 Pydantic 输入输出映射，然后创建 OpenAI 客户端调用 LLM，因此完整执行需要 `TALAI_BASE_URL` 与 `TALAI_API_KEY`：
+
+```bash
+cd week02/2-1
+python3.12 search_order_tool.py
+```
+
+本地 Tool 部分会查询 `user_id="262789"` 的 pending 订单，并输出经过 `SearchOrdersOutput` 验收的 JSON；金额字段使用最小货币单位 `amount_cents`。
 
 ---
 
