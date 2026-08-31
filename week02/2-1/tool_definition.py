@@ -28,7 +28,7 @@ class ToolDefinition:
     # 默认按“安全的只读工具”处理
     # side_effect: SideEffect = "none"
     requires_confirmation: bool = False
-    idempotency: bool = True
+    idempotency: bool = True    # 重复调用是否安全
     version: str = "v1"
 
     # ===== 授权与风险 =====

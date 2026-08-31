@@ -1,7 +1,6 @@
 from dataclasses import dataclass, field
 from typing import Any
 from pydantic import BaseModel, ConfigDict
-from typing import Literal
 from enum import StrEnum
 
 """
@@ -43,12 +42,12 @@ database:query
 @dataclass(frozen=True)
 class ExecutionContext:
     # 由服务端可信身份系统构造，不从llm参数中获取
-    user_id: str
-    tenant_id: str
-    permission: frozenset[str]
-    approved_call_ids: frozenset[str] = field(default_factory=frozenset)
+    user_id: str        # 当前用户id
+    tenant_id: str      # 租户id
+    permission: frozenset[str]  # 上下文操作权限
+    approved_call_ids: frozenset[str] = field(default_factory=frozenset)    # 已授权的tool_call_id？
     trace_id: str = ""
-    order_service: object | None = None
+    order_service: object | None = None # 绑定的具体服务，测试用
 
 class ToolInput(BaseModel):
     """所有工具入参的基类"""
@@ -79,6 +78,8 @@ class ToolErrorCode(StrEnum):
     UNAVAILABLE = "unavailable"
     UPSTREAM_ERROR = "upstream_error"
     INTERNAL_ERROR = "internal_error"
+    APPROVAL_REQUIRED = "approval_required"
+    INVALID_OUTPUT = "invalid_output"
 
 # 统一表达错误的方式
 class ToolError(BaseModel):
