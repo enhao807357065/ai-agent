@@ -47,6 +47,11 @@ RETRIABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
     asyncio.TimeoutError,
 )
 
+# 一个候选 target 先在自身内消化短暂故障，耗尽后才允许 fallback。
+MAX_ATTEMPTS_PER_TARGET = 3
+RETRY_BASE_DELAY_SECONDS = 0.25
+RETRY_MAX_DELAY_SECONDS = 2.0
+
 try:
     from openai import APIConnectionError, APITimeoutError, InternalServerError, RateLimitError
 
@@ -133,9 +138,15 @@ class GatewayModelRouter:
         )
 
     @staticmethod
+    def _retry_delay(retry_index: int) -> float:
+        """返回当前 target 的下一次重试等待时间（retry_index 从 0 开始）。"""
+        return min(RETRY_BASE_DELAY_SECONDS * 2 ** retry_index, RETRY_MAX_DELAY_SECONDS)
+
+    @staticmethod
     def _route_info(name: str, candidate: CandidateTarget, attempt: int) -> GatewayRouteInfo:
         return GatewayRouteInfo(
             logical_model=name,
+            target_id=candidate.profile.id,
             provider=candidate.profile.provider,
             upstream_model=candidate.profile.model,
             attempt=attempt,
@@ -170,79 +181,223 @@ class GatewayModelRouter:
             raise GatewayConfigurationError("Gateway provider configuration is invalid") from exc
 
     async def complete(self, logical_model: str | None, call: GatewayModelCall) -> GatewayModelResult:
-        # 在请求出网前验证 schema 自身，避免把调用方契约错误伪装成 upstream 400。
+        """执行非流式请求：每个 target 最多尝试三次，随后才按候选顺序 fallback。"""
+        request_started = time.perf_counter()
         json_schema_from_call(call)
         name, candidates = self._candidates(logical_model, call, stream=False)
         await self._limiter.acquire_request(name)
         errors: list[str] = []
+        total_attempts = 0
 
-        for attempt, candidate in enumerate(candidates, start=1):
+        for candidate_index, candidate in enumerate(candidates, start=1):
             model = self._create_model(candidate)
-            started = time.perf_counter()
-            try:
-                logger.info("gateway.route_selected", logical_model=name, target_id=candidate.profile.id, attempt=attempt)
-                completion = await model.complete(**call.model_dump())
-                validate_structured_output(completion.content, call)
-                self._health.record_success(candidate.profile.id, (time.perf_counter() - started) * 1000)
-                usage = GatewayUsage(input_tokens=completion.input_tokens, output_tokens=completion.output_tokens)
-                self._limiter.report_tokens(name, usage.total_tokens)
-                return GatewayModelResult(
-                    route=self._route_info(name, candidate, attempt),
-                    content=completion.content,
-                    tool_calls=[GatewayToolCall(id=item.id, name=item.name, arguments=item.arguments) for item in completion.tool_calls],
-                    finish_reason=cast(Literal["stop", "tool_calls", "length"], completion.finish_reason),
-                    usage=GatewayUsage(input_tokens=completion.input_tokens, output_tokens=completion.output_tokens),
-                )
-            except RETRIABLE_EXCEPTIONS as exc:
-                self._health.record_retriable_failure(candidate.profile.id)
-                errors.append(f"{candidate.profile.id}: {type(exc).__name__}")
-                logger.warning("gateway.fallback", logical_model=name, target_id=candidate.profile.id, attempt=attempt, error=str(exc))
+            for target_attempt in range(1, MAX_ATTEMPTS_PER_TARGET + 1):
+                total_attempts += 1
+                attempt_started = time.perf_counter()
+                try:
+                    logger.info(
+                        "gateway.route_selected",
+                        logical_model=name,
+                        target_id=candidate.profile.id,
+                        candidate_index=candidate_index,
+                        target_attempt=target_attempt,
+                        total_attempts=total_attempts,
+                    )
+                    completion = await model.complete(**call.model_dump())
+                    validate_structured_output(completion.content, call)
+                    attempt_latency_ms = (time.perf_counter() - attempt_started) * 1000
+                    self._health.record_success(candidate.profile.id, attempt_latency_ms)
+                    usage = GatewayUsage(input_tokens=completion.input_tokens, output_tokens=completion.output_tokens)
+                    self._limiter.report_tokens(name, usage.total_tokens)
+                    result = GatewayModelResult(
+                        route=self._route_info(name, candidate, candidate_index),
+                        content=completion.content,
+                        tool_calls=[GatewayToolCall(id=item.id, name=item.name, arguments=item.arguments) for item in completion.tool_calls],
+                        finish_reason=cast(Literal["stop", "tool_calls", "length"], completion.finish_reason),
+                        usage=usage,
+                    )
+                    logger.info(
+                        "gateway.request_completed",
+                        logical_model=name,
+                        target_id=candidate.profile.id,
+                        provider=candidate.profile.provider,
+                        upstream_model=candidate.profile.model,
+                        stream=False,
+                        candidate_index=candidate_index,
+                        target_attempt=target_attempt,
+                        total_attempts=total_attempts,
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        total_tokens=usage.total_tokens,
+                        total_latency_ms=round((time.perf_counter() - request_started) * 1000),
+                    )
+                    return result
+                except RETRIABLE_EXCEPTIONS as exc:
+                    self._health.record_retriable_failure(candidate.profile.id)
+                    errors.append(f"{candidate.profile.id}#{target_attempt}: {type(exc).__name__}")
+                    if target_attempt == MAX_ATTEMPTS_PER_TARGET:
+                        logger.warning(
+                            "gateway.fallback",
+                            logical_model=name,
+                            target_id=candidate.profile.id,
+                            candidate_index=candidate_index,
+                            target_attempt=target_attempt,
+                            total_attempts=total_attempts,
+                            error_type=type(exc).__name__,
+                            error=str(exc),
+                        )
+                        break
+                    delay = self._retry_delay(target_attempt - 1)
+                    logger.warning(
+                        "gateway.retry_scheduled",
+                        logical_model=name,
+                        target_id=candidate.profile.id,
+                        candidate_index=candidate_index,
+                        target_attempt=target_attempt,
+                        total_attempts=total_attempts,
+                        retry_delay_ms=round(delay * 1000),
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
+                    await asyncio.sleep(delay)
 
+        logger.error(
+            "gateway.request_failed",
+            logical_model=name,
+            stream=False,
+            total_attempts=total_attempts,
+            total_latency_ms=round((time.perf_counter() - request_started) * 1000),
+            error_type="GatewayUpstreamUnavailable",
+            errors=errors,
+        )
         raise GatewayUpstreamUnavailable(f"All eligible targets for '{name}' failed: {'; '.join(errors)}")
 
     async def stream(self, logical_model: str | None, call: GatewayModelCall) -> AsyncIterator[GatewayStreamEvent]:
-        """首个有效文本/工具输出前可换下一个能力兼容候选；之后绝不切换。"""
+        """首个有效输出前可重试或 fallback；首个输出后绝不切换 target。"""
+        request_started = time.perf_counter()
         json_schema_from_call(call)
         name, candidates = self._candidates(logical_model, call, stream=True)
         await self._limiter.acquire_request(name)
         errors: list[str] = []
+        total_attempts = 0
 
-        for attempt, candidate in enumerate(candidates, start=1):
+        for candidate_index, candidate in enumerate(candidates, start=1):
             model = self._create_model(candidate)
-            emitted_output = False
-            text_parts: list[str] = []
-            started = time.perf_counter()
-            try:
-                logger.info("gateway.route_selected", logical_model=name, target_id=candidate.profile.id, attempt=attempt)
-                async for chunk in model.stream(**call.model_dump()):
-                    if isinstance(chunk, TextChunk):
-                        emitted_output = True
-                        text_parts.append(chunk.content)
-                        yield GatewayTextDelta(content=chunk.content)
-                    elif isinstance(chunk, ToolCallChunk):
-                        emitted_output = True
-                        yield GatewayToolCallEvent(tool_call=GatewayToolCall(
-                            id=chunk.id, name=chunk.name, arguments=chunk.arguments,
-                        ))
-                    elif isinstance(chunk, StreamDone):
-                        validate_structured_output("".join(text_parts), call)
-                        self._health.record_success(candidate.profile.id, (time.perf_counter() - started) * 1000)
-                        usage = GatewayUsage(input_tokens=chunk.input_tokens, output_tokens=chunk.output_tokens)
-                        self._limiter.report_tokens(name, usage.total_tokens)
-                        yield GatewayCompletedEvent(
-                            finish_reason=cast(Literal["stop", "tool_calls", "length"], chunk.finish_reason),
-                            usage=GatewayUsage(input_tokens=chunk.input_tokens, output_tokens=chunk.output_tokens),
-                            route=self._route_info(name, candidate, attempt),
+            for target_attempt in range(1, MAX_ATTEMPTS_PER_TARGET + 1):
+                total_attempts += 1
+                emitted_output = False
+                ttft_ms: int | None = None
+                text_parts: list[str] = []
+                attempt_started = time.perf_counter()
+                try:
+                    logger.info(
+                        "gateway.route_selected",
+                        logical_model=name,
+                        target_id=candidate.profile.id,
+                        candidate_index=candidate_index,
+                        target_attempt=target_attempt,
+                        total_attempts=total_attempts,
+                    )
+                    async for chunk in model.stream(**call.model_dump()):
+                        if isinstance(chunk, TextChunk):
+                            if not emitted_output:
+                                ttft_ms = round((time.perf_counter() - request_started) * 1000)
+                            emitted_output = True
+                            text_parts.append(chunk.content)
+                            yield GatewayTextDelta(content=chunk.content)
+                        elif isinstance(chunk, ToolCallChunk):
+                            if not emitted_output:
+                                ttft_ms = round((time.perf_counter() - request_started) * 1000)
+                            emitted_output = True
+                            yield GatewayToolCallEvent(tool_call=GatewayToolCall(
+                                id=chunk.id, name=chunk.name, arguments=chunk.arguments,
+                            ))
+                        elif isinstance(chunk, StreamDone):
+                            validate_structured_output("".join(text_parts), call)
+                            attempt_latency_ms = (time.perf_counter() - attempt_started) * 1000
+                            self._health.record_success(candidate.profile.id, attempt_latency_ms)
+                            usage = GatewayUsage(input_tokens=chunk.input_tokens, output_tokens=chunk.output_tokens)
+                            self._limiter.report_tokens(name, usage.total_tokens)
+                            logger.info(
+                                "gateway.request_completed",
+                                logical_model=name,
+                                target_id=candidate.profile.id,
+                                provider=candidate.profile.provider,
+                                upstream_model=candidate.profile.model,
+                                stream=True,
+                                candidate_index=candidate_index,
+                                target_attempt=target_attempt,
+                                total_attempts=total_attempts,
+                                input_tokens=usage.input_tokens,
+                                output_tokens=usage.output_tokens,
+                                total_tokens=usage.total_tokens,
+                                total_latency_ms=round((time.perf_counter() - request_started) * 1000),
+                                ttft_ms=ttft_ms,
+                            )
+                            yield GatewayCompletedEvent(
+                                finish_reason=cast(Literal["stop", "tool_calls", "length"], chunk.finish_reason),
+                                usage=usage,
+                                route=self._route_info(name, candidate, candidate_index),
+                            )
+                    return
+                except RETRIABLE_EXCEPTIONS as exc:
+                    self._health.record_retriable_failure(candidate.profile.id)
+                    if emitted_output:
+                        logger.error(
+                            "gateway.request_failed",
+                            logical_model=name,
+                            target_id=candidate.profile.id,
+                            provider=candidate.profile.provider,
+                            upstream_model=candidate.profile.model,
+                            stream=True,
+                            candidate_index=candidate_index,
+                            target_attempt=target_attempt,
+                            total_attempts=total_attempts,
+                            total_latency_ms=round((time.perf_counter() - request_started) * 1000),
+                            ttft_ms=ttft_ms,
+                            error_type=type(exc).__name__,
+                            error=str(exc),
+                            emitted_output=True,
                         )
-                return
-            except RETRIABLE_EXCEPTIONS as exc:
-                self._health.record_retriable_failure(candidate.profile.id)
-                if emitted_output:
-                    logger.warning("gateway.stream_failed_after_output", logical_model=name, target_id=candidate.profile.id, error=str(exc))
-                    raise
-                errors.append(f"{candidate.profile.id}: {type(exc).__name__}")
-                logger.warning("gateway.stream_fallback", logical_model=name, target_id=candidate.profile.id, attempt=attempt, error=str(exc))
+                        raise
 
+                    errors.append(f"{candidate.profile.id}#{target_attempt}: {type(exc).__name__}")
+                    if target_attempt == MAX_ATTEMPTS_PER_TARGET:
+                        logger.warning(
+                            "gateway.stream_fallback",
+                            logical_model=name,
+                            target_id=candidate.profile.id,
+                            candidate_index=candidate_index,
+                            target_attempt=target_attempt,
+                            total_attempts=total_attempts,
+                            error_type=type(exc).__name__,
+                            error=str(exc),
+                        )
+                        break
+                    delay = self._retry_delay(target_attempt - 1)
+                    logger.warning(
+                        "gateway.stream_retry_scheduled",
+                        logical_model=name,
+                        target_id=candidate.profile.id,
+                        candidate_index=candidate_index,
+                        target_attempt=target_attempt,
+                        total_attempts=total_attempts,
+                        retry_delay_ms=round(delay * 1000),
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
+                    await asyncio.sleep(delay)
+
+        logger.error(
+            "gateway.request_failed",
+            logical_model=name,
+            stream=True,
+            total_attempts=total_attempts,
+            total_latency_ms=round((time.perf_counter() - request_started) * 1000),
+            error_type="GatewayUpstreamUnavailable",
+            errors=errors,
+            emitted_output=False,
+        )
         raise GatewayUpstreamUnavailable(f"All eligible targets for '{name}' failed before first output: {'; '.join(errors)}")
 
 

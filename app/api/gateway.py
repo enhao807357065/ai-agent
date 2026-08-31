@@ -12,12 +12,13 @@ from collections.abc import AsyncIterator
 
 import structlog
 import asyncio
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
+from app.core.system_prompts import get_version, render_prompt
 from app.models.gateway import (
     GatewayCompletedEvent,
     GatewayError,
@@ -52,6 +53,10 @@ logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["LLM Gateway"])
 
 
+class GatewayPromptReferenceError(ValueError):
+    """Prompt 引用不存在、变量不受支持或出现 system message 冲突。"""
+
+
 def _id(prefix: str = "gwresp") -> str:
     return f"{prefix}_{uuid.uuid4().hex}"
 
@@ -71,6 +76,8 @@ def _gateway_error(
     stream_started: bool = False,
 ) -> tuple[int, GatewayError]:
     """将领域/SDK 异常转换为稳定的公开错误码，绝不返回原始 provider 信息。"""
+    if isinstance(exc, GatewayPromptReferenceError):
+        return 422, GatewayError(code="invalid_prompt_reference", message=str(exc))
     if isinstance(exc, RateLimitExceeded):
         return 429, GatewayError(
             code="rate_limited",
@@ -141,10 +148,44 @@ def _error_response(exc: Exception) -> JSONResponse:
     )
 
 
+def _prompt_id(request: GatewayRequest) -> str | None:
+    """仅记录稳定 Prompt ID；绝不记录渲染内容或变量，避免泄露业务/用户数据。"""
+    return request.prompt.id if request.prompt is not None else None
+
+
+def _resolved_messages(request: GatewayRequest) -> list[dict[str, Any]]:
+    """将可选的 PromptReference 展开为唯一的 canonical system message。"""
+    messages = [message.model_dump(exclude_none=True) for message in request.messages]
+    if request.prompt is None:
+        return messages
+
+    if any(message["role"] == "system" for message in messages):
+        raise GatewayPromptReferenceError(
+            "prompt cannot be combined with caller-provided system messages"
+        )
+
+    version = get_version(request.prompt.id)
+    if version is None:
+        raise GatewayPromptReferenceError(f"Unknown prompt version: {request.prompt.id}")
+
+    server_variables = {"current_time"}
+    allowed_caller_variables = set(version.variables) - server_variables
+    unexpected_variables = set(request.prompt.variables) - allowed_caller_variables
+    if unexpected_variables:
+        names = ", ".join(sorted(unexpected_variables))
+        raise GatewayPromptReferenceError(
+            f"Unsupported variables for prompt '{version.id}': {names}"
+        )
+
+    variables = {name: "" for name in allowed_caller_variables}
+    variables.update(request.prompt.variables)
+    return [{"role": "system", "content": render_prompt(version.id, **variables)}, *messages]
+
+
 def _to_model_call(request: GatewayRequest) -> GatewayModelCall:
     """公共 HTTP 请求 → Router 的内部调用 Command。"""
     return GatewayModelCall(
-        messages=[message.model_dump(exclude_none=True) for message in request.messages],
+        messages=_resolved_messages(request),
         tools=[
             {
                 "type": "function",
@@ -166,15 +207,46 @@ async def list_models() -> GatewayModelsResponse:
     )
 
 
-async def _gateway_response(request: GatewayRequest) -> GatewayResponse | JSONResponse:
+async def _gateway_response(
+    request: GatewayRequest,
+    *,
+    request_id: str,
+    request_started: float,
+) -> GatewayResponse | JSONResponse:
     """三个 URL 共用的非流式执行入口，统一转换所有运行期异常。"""
     try:
         result = await gateway_model_router.complete(request.model, _to_model_call(request))
     except Exception as exc:
+        _, error = _gateway_error(exc)
+        logger.warning(
+            "gateway.http_request_failed",
+            request_id=request_id,
+            logical_model=request.model,
+            prompt_id=_prompt_id(request),
+            stream=False,
+            code=error.code,
+            error_type=type(exc).__name__,
+            total_latency_ms=round((time.perf_counter() - request_started) * 1000),
+        )
         return _error_response(exc)
 
+    logger.info(
+        "gateway.http_request_completed",
+        request_id=request_id,
+        logical_model=request.model,
+        prompt_id=_prompt_id(request),
+        stream=False,
+        target_id=result.route.target_id,
+        provider=result.route.provider,
+        upstream_model=result.route.upstream_model,
+        candidate_index=result.route.attempt,
+        input_tokens=result.usage.input_tokens,
+        output_tokens=result.usage.output_tokens,
+        total_tokens=result.usage.total_tokens,
+        total_latency_ms=round((time.perf_counter() - request_started) * 1000),
+    )
     return GatewayResponse(
-        id=_id(),
+        id=request_id,
         created=_now(),
         model=request.model,
         content=result.content,
@@ -184,29 +256,54 @@ async def _gateway_response(request: GatewayRequest) -> GatewayResponse | JSONRe
     )
 
 
-async def _stream_gateway_response(request: GatewayRequest) -> AsyncIterator[str]:
+async def _stream_gateway_response(
+    request: GatewayRequest,
+    *,
+    request_id: str,
+    request_started: float,
+) -> AsyncIterator[str]:
     """三个 URL 共用的流式入口；运行期失败以 ``gateway.error`` SSE 表达。"""
-    response_id = _id()
     emitted_output = False
+    ttft_ms: int | None = None
     try:
         async for event in gateway_model_router.stream(request.model, _to_model_call(request)):
             if isinstance(event, GatewayTextDelta):
+                if not emitted_output:
+                    ttft_ms = round((time.perf_counter() - request_started) * 1000)
                 emitted_output = True
                 yield _sse(GatewayResponseTextDelta(
-                    id=response_id,
+                    id=request_id,
                     model=request.model,
                     content=event.content,
                 ))
             elif isinstance(event, GatewayToolCallEvent):
+                if not emitted_output:
+                    ttft_ms = round((time.perf_counter() - request_started) * 1000)
                 emitted_output = True
                 yield _sse(GatewayResponseToolCallEvent(
-                    id=response_id,
+                    id=request_id,
                     model=request.model,
                     tool_call=event.tool_call,
                 ))
             elif isinstance(event, GatewayCompletedEvent):
+                logger.info(
+                    "gateway.http_request_completed",
+                    request_id=request_id,
+                    logical_model=request.model,
+                    prompt_id=_prompt_id(request),
+                    stream=True,
+                    target_id=event.route.target_id,
+                    provider=event.route.provider,
+                    upstream_model=event.route.upstream_model,
+                    candidate_index=event.route.attempt,
+                    input_tokens=event.usage.input_tokens,
+                    output_tokens=event.usage.output_tokens,
+                    total_tokens=event.usage.total_tokens,
+                    total_latency_ms=round((time.perf_counter() - request_started) * 1000),
+                    ttft_ms=ttft_ms,
+                )
                 yield _sse(GatewayResponseCompletedEvent(
-                    id=response_id,
+                    id=request_id,
                     model=request.model,
                     finish_reason=event.finish_reason,
                     usage=event.usage,
@@ -214,35 +311,68 @@ async def _stream_gateway_response(request: GatewayRequest) -> AsyncIterator[str
     except Exception as exc:
         _, error = _gateway_error(exc, stream_started=emitted_output)
         logger.warning(
-            "gateway.stream_error_event",
+            "gateway.http_request_failed",
+            request_id=request_id,
             logical_model=request.model,
+            prompt_id=_prompt_id(request),
+            stream=True,
             code=error.code,
+            error_type=type(exc).__name__,
             emitted_output=emitted_output,
+            total_latency_ms=round((time.perf_counter() - request_started) * 1000),
+            ttft_ms=ttft_ms,
         )
         yield _sse(GatewayResponseErrorEvent(
-            id=response_id,
+            id=request_id,
             model=request.model,
             error=error,
         ))
 
 
 async def _handle_gateway(request: GatewayRequest) -> GatewayResponse | JSONResponse | StreamingResponse:
-    logger.info("gateway.request", logical_model=request.model, stream=request.stream)
+    request_id = _id()
+    request_started = time.perf_counter()
+    logger.info(
+        "gateway.request",
+        request_id=request_id,
+        logical_model=request.model,
+        prompt_id=_prompt_id(request),
+        stream=request.stream,
+    )
 
     # StreamingResponse 开始发送后无法改写为 HTTP 4xx，因此预校验必须在这里完成。
     try:
         gateway_model_router.resolve(request.model)
         json_schema_from_call(_to_model_call(request))
     except Exception as exc:
+        _, error = _gateway_error(exc)
+        logger.warning(
+            "gateway.http_request_failed",
+            request_id=request_id,
+            logical_model=request.model,
+            prompt_id=_prompt_id(request),
+            stream=request.stream,
+            code=error.code,
+            error_type=type(exc).__name__,
+            total_latency_ms=round((time.perf_counter() - request_started) * 1000),
+        )
         return _error_response(exc)
 
     if request.stream:
         return StreamingResponse(
-            _stream_gateway_response(request),
+            _stream_gateway_response(
+                request,
+                request_id=request_id,
+                request_started=request_started,
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-    return await _gateway_response(request)
+    return await _gateway_response(
+        request,
+        request_id=request_id,
+        request_started=request_started,
+    )
 
 
 # 三条路径保持可访问，但它们不再代表三个外部厂商协议。

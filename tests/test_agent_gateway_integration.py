@@ -25,7 +25,7 @@ class FakeGatewayRouter:
         self.complete_calls.append((logical_model, call))
         return GatewayModelResult(
             route=GatewayRouteInfo(
-                logical_model=logical_model or "", provider="test", upstream_model="hidden",
+                logical_model=logical_model or "", target_id="test/hidden", provider="test", upstream_model="hidden",
                 attempt=1, used_fallback=False,
             ),
             content='{"answer":"ok"}',
@@ -39,7 +39,7 @@ class FakeGatewayRouter:
             finish_reason="stop",
             usage=GatewayUsage(input_tokens=5, output_tokens=2),
             route=GatewayRouteInfo(
-                logical_model=logical_model or "", provider="test", upstream_model="hidden",
+                logical_model=logical_model or "", target_id="test/hidden", provider="test", upstream_model="hidden",
                 attempt=1, used_fallback=False,
             ),
         )

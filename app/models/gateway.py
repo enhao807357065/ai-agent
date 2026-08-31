@@ -42,6 +42,7 @@ class GatewayRouteInfo(BaseModel):
     """本次调用最终命中的上游路由，供网关内部观测与协议编码使用。"""
 
     logical_model: str
+    target_id: str
     provider: str
     upstream_model: str
     attempt: int = Field(ge=1)
@@ -126,11 +127,19 @@ class GatewayFunctionTool(BaseModel):
     )
 
 
+class PromptReference(BaseModel):
+    """对已发布且不可变的 System Prompt 版本的显式引用。"""
+
+    id: str = Field(min_length=1, description="PromptVersion ID，例如 coder-v1")
+    variables: dict[str, str] = Field(default_factory=dict)
+
+
 class GatewayRequest(BaseModel):
     """所有 Gateway HTTP 路径共用的统一请求契约。"""
 
     model: str = Field(min_length=1, description="网关暴露的逻辑模型名")
     messages: list[GatewayMessage] = Field(min_length=1)
+    prompt: PromptReference | None = None
     tools: list[GatewayFunctionTool] | None = None
     stream: bool = False
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
@@ -184,6 +193,7 @@ class GatewayError(BaseModel):
 
     code: Literal[
         "invalid_request",
+        "invalid_prompt_reference",
         "invalid_model",
         "rate_limited",
         "capability_unavailable",
