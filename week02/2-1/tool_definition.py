@@ -2,7 +2,8 @@ from dataclasses import dataclass, field
 
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Literal, Callable, Awaitable
-from execution_context import ExecutionContext, ToolError
+from execution_context import ExecutionContext
+from tool_contracts import ToolError
 
 Handler = Callable[
     [BaseModel, "ExecutionContext"],    # 加引号后，不会因为定义位置变化而立刻报错。
@@ -46,7 +47,8 @@ class ToolDefinition:
     retry_policy: type[BaseModel] | None = None
 
     # 统一的错误序列化模型
-    error_model: type[BaseModel] = ToolError
+    # 自定义错误模型必须继承 ToolError，保证 Runtime 可读取 code / retryable。
+    error_model: type[ToolError] = ToolError
 
     # 审计默认开启；生产环境通常不应默认关闭
     audit_log: bool = True
@@ -58,11 +60,18 @@ class ToolDefinition:
     concurrency_limit: int | None = None
 
     def to_model_tools(self) -> dict:
+        """生成给 LLM 的函数调用 Schema。"""
+        description_parts = [self.description]
+        if self.when_to_use:
+            description_parts.append(f"适用场景：{self.when_to_use}")
+        if self.when_not_to_use:
+            description_parts.append(f"不要使用于：{self.when_not_to_use}")
+
         return {
             "type": "function",
             "function": {
                 "name": self.name,
-                "description": self.description,
+                "description": "\n".join(description_parts),
                 "parameters": self.input_model.model_json_schema(),
             }
         }

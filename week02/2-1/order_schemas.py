@@ -1,7 +1,7 @@
 from pydantic import Field, model_validator
 from typing import Literal
 from datetime import date
-from execution_context import ToolInput, ToolOutput
+from tool_contracts import ToolInput, ToolOutput
 
 # class StrictModel(BaseModel):
 #     model_config = ConfigDict(extra="forbid", strict=True)
@@ -29,3 +29,15 @@ class OrderSummary(ToolOutput):
 class SearchOrdersOutput(ToolOutput):
     orders: list[OrderSummary]
     total: int = Field(ge=0)
+
+# 取消订单
+class CancelOrderInput(ToolInput):
+    order_id: str = Field(..., description="订单id")
+    reason: str = Field(..., description="取消原因")
+
+# 取消订单返回值
+class CancelOrderOutput(ToolOutput):
+    order_id: str | None = None
+    status: Literal["pending", "paid", "shipped", "canceled"] | None = None
+    success: bool = Field(default=False, description="是否操作成功")   # 是否操作成功
+    msg: str    =   Field(description="提示信息")        # 提示信息

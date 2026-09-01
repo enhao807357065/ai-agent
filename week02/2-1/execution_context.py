@@ -1,7 +1,4 @@
 from dataclasses import dataclass, field
-from typing import Any
-from pydantic import BaseModel, ConfigDict
-from enum import StrEnum
 
 """
 toolcall runtime职责：
@@ -17,7 +14,7 @@ toolcall runtime职责：
 10.资源治理：并发上限、限流、预算、队列、租户隔离等，多agent下很容易把下游打爆
 
 注意：
-1. 不信任llm的toolcall：模型产生的工具参数，本纸上属于不可信输入，必须做pydantic/json schema做强校验、拒绝未知字段，避免参数走私、权限判断必须以ExecutionContext为准，而不是tool arguments
+1. 不信任llm的toolcall：模型产生的工具参数，本质上属于不可信输入，必须做pydantic/json schema做强校验、拒绝未知字段，避免参数走私、权限判断必须以ExecutionContext为准，而不是tool arguments
 2. 身份上下文必须由服务端注入：如果需要读取指定用户的场景，需要校验是否有读取target_user_id的权限
 3. tool_output也不可信：网页内容、rag文档、邮件、数据库文本、第三方api返回值同样会反过来污染上下文。
     runtime不应该把原始工具内容毫无边界的塞给模型，至少应做：标记来源、限制单次输出长度和总token_budget、清洗html/二进制/不必要字段、对敏感字段脱敏
@@ -48,54 +45,3 @@ class ExecutionContext:
     approved_call_ids: frozenset[str] = field(default_factory=frozenset)    # 已授权的tool_call_id？
     trace_id: str = ""
     order_service: object | None = None # 绑定的具体服务，测试用
-
-class ToolInput(BaseModel):
-    """所有工具入参的基类"""
-    model_config = ConfigDict(extra="forbid")
-
-class ToolOutput(BaseModel):
-    """所有工具成功返回的基类"""
-    model_config = ConfigDict(extra="forbid")
-
-
-class ToolErrorCode(StrEnum):
-    # 调用方 / 输入问题：通常不可重试
-    INVALID_ARGUMENT = "invalid_argument"
-    VALIDATION_ERROR = "validation_error"
-
-    # 身份与权限问题：通常不可重试
-    UNAUTHENTICATED = "unauthenticated"
-    PERMISSION_DENIED = "permission_denied"
-
-    # 业务状态问题：通常不可重试
-    NOT_FOUND = "not_found"
-    CONFLICT = "conflict"
-    PRECONDITION_FAILED = "precondition_failed"
-
-    # 资源和系统问题：可能可重试
-    RATE_LIMITED = "rate_limited"
-    TIMEOUT = "timeout"
-    UNAVAILABLE = "unavailable"
-    UPSTREAM_ERROR = "upstream_error"
-    INTERNAL_ERROR = "internal_error"
-    APPROVAL_REQUIRED = "approval_required"
-    INVALID_OUTPUT = "invalid_output"
-
-# 统一表达错误的方式
-class ToolError(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    code: ToolErrorCode
-    message: str    # 可以安全展示给llm或用户的消息
-    retryable: bool = False
-    trace_id: str | None = None
-
-
-@dataclass
-class ToolResult:
-    call_id: str
-    status: str # success | denied | invalid_args | timeout | failed
-    content: str
-    structured_data: dict[str, Any] | None = None
-    retryable: bool = False
-

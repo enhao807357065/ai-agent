@@ -1,7 +1,7 @@
 import json
-from typing import Any, Literal
+from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
-from tool_definition import ToolError
+from tool_contracts import ToolError
 
 
 class ToolCall(BaseModel):
