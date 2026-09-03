@@ -1,4 +1,44 @@
 # 支持ToolSnapshot、ToolRegistry、ToolRuntime、ExecutionContext的工具调用
+# Agent Run 创建
+#     │
+#     ├─ 控制面读取 route / enabled / tenant / rollout
+#     │
+#     └─ Registry 生成不可变 ToolSnapshot
+#              │
+#              └─ Snapshot 导出 LLM Provider tools
+#
+# LLM 返回 ToolCall（不可信）
+#     │
+#     ▼
+# ToolRuntime.invoke(snapshot, call, ctx)
+#     │
+#     ├─ 1. 从 Snapshot 查询 tool
+#     │      └─ 无 → TOOL_NOT_FOUND
+#     │
+#     ├─ 2. 实时 kill switch
+#     │      └─ 关闭 → TOOL_DISABLED
+#     │
+#     ├─ 3. Pydantic 输入校验
+#     │      └─ 失败 → INVALID_ARGUMENT
+#     │
+#     ├─ 4. Permission 检查
+#     │      └─ 失败 → PERMISSION_DENIED
+#     │
+#     ├─ 5. Approval 检查
+#     │      └─ 失败 → APPROVAL_REQUIRED
+#     │
+#     ├─ 6. Dependency / concurrency / rate-limit
+#     │      └─ 失败 → DEPENDENCY_UNAVAILABLE 等
+#     │
+#     ├─ 7. timeout 包裹 handler 执行
+#     │      └─ 仅幂等 transient 失败可 retry
+#     │
+#     ├─ 8. Pydantic 输出校验
+#     │      └─ 失败 → INVALID_OUTPUT
+#     │
+#     ├─ 9. 写审计事件
+#     │
+#     └─ 10. 输出 JSON 字符串形式的 ToolMessageResult
 
 import asyncio
 import json
