@@ -314,13 +314,15 @@ ai-agent/
 │   ├── 1-4/                    # Prompt 模板引擎
 │   └── 1-5/                    # 结构化输出与字段校验
 ├── week02/                     # 第二周：Tool Runtime
-│   └── 2-1/                    # 类型化 Tool 定义、注册、消息契约与订单查询示例
-│       ├── execution_context.py
-│       ├── tool_definition.py
-│       ├── tool_runtime.py
-│       ├── tool_messages.py
-│       ├── order_schemas.py
-│       └── search_order_tool.py
+│   ├── 2-1/                    # 类型化 Tool 定义、注册、消息契约与订单查询示例
+│   │   ├── execution_context.py
+│   │   ├── tool_definition.py
+│   │   ├── tool_runtime.py
+│   │   ├── tool_messages.py
+│   │   ├── order_schemas.py
+│   │   └── search_order_tool.py
+│   └── 2-2/                    # v3：版本化 Registry、Run Snapshot 与受控调用链
+│       └── mini_agent_loop.py  # 单文件、离线可运行的教学 Demo
 ├── docs/
 │   └── curl-examples.md        # 完整 API curl 请求示例
 ├── .env.example                # 环境变量模板
@@ -515,6 +517,69 @@ python3.12 search_order_tool.py
 ```
 
 本地 Tool 部分会查询 `user_id="262789"` 的 pending 订单，并输出经过 `SearchOrdersOutput` 验收的 JSON；金额字段使用最小货币单位 `amount_cents`。
+
+---
+
+### week02/2-2 — v3：版本化 Tool Runtime、Snapshot 与风险治理
+
+`week02/2-2/mini_agent_loop.py` 是不依赖 API Key 或真实 LLM 的单文件教学 Demo。它用 `FakePlanner` 模拟 LLM 生成的、因此必须被视为**不可信输入**的 `ToolCall`，重点练习完整的服务端 Tool Runtime 调用链。
+
+```text
+Agent Run 创建
+  → ToolRegistry.snapshot(routes, route_revision)
+      → 校验路由的 (tool_name, version) 是否已注册且当前可用
+      → 冻结为只读 ToolSnapshot：tool_name → 服务端选定的 ToolDefinition
+  → FakePlanner / LLM 生成 ToolCall（不带 version）
+  → ToolRuntime.invoke(snapshot, call, ctx)
+      1. 从 Snapshot 查找工具
+      2. 实时检查 family 与 version kill switch
+      3. Pydantic 校验输入
+      4. 校验可信 ExecutionContext 的权限
+      5. high risk 检查精确 tool_call_id 的审批
+      6. timeout 内运行 handler；仅幂等工具允许 timeout retry
+      7. Pydantic 校验 handler 输出
+      8. 记录最小化脱敏审计事件
+  → 返回 ToolResultMessage，作为 role="tool" 消息写回 Agent history
+```
+
+#### Registry、Snapshot 与开关语义
+
+| 概念 | 数据形状 | 作用 |
+|---|---|---|
+| Registry | `(name, version) → ToolDefinition` | 全局、可变的多版本工具仓库 |
+| Route | `name → version` | 服务端为一次新 Run 选择版本；LLM 不可指定版本 |
+| ToolSnapshot | `name → ToolDefinition`（只读） | 固定本次 Run 看见且应调用的版本，避免路由更新造成调用版本漂移 |
+| Family kill switch | `name → enabled` | 事故时关闭该工具的所有版本 |
+| Version kill switch | `(name, version) → enabled` | 只停止故障版本，例如停止 v1 同时保留 v2 |
+
+Runtime 在执行前会再次检查开关。因此 Snapshot 冻结的是“**执行哪个版本**”，不是“**永远可以执行**”：已经创建的旧 Snapshot 也会在 `get_weather@v1` 被停用后返回 `TOOL_DISABLED`。
+
+`register()` 中的 `dict.setdefault()` 不会覆盖既有开关：已有 family 被关闭时，注册 v3 不会重新启用 family；新 v3 仅会获得自己的默认 version eligibility。由于实际可执行条件是 `family_enabled and version_enabled`，family 仍关闭时 v3 也无法被调用。生产发布流程通常还会让新版本默认 `version_enabled=False`，再由灰度/发布控制面显式放量。
+
+#### 两个模拟工具与风险策略
+
+| Tool | 版本 | 权限 | risk | 幂等性 | 运行策略 |
+|---|---|---|---|---|---|
+| `get_weather` | v1 / v2 | `weather:read` | `low` | 是 | 参数与权限通过后直接执行；timeout 可重试一次 |
+| `create_order` | v1 | `order:write` | `high` | 是（由业务幂等键保障） | 参数、权限通过后先返回 `APPROVAL_REQUIRED`；确认后以**相同 ToolCall**恢复 |
+
+`risk` 是影响等级，不是权限替代品。`order:write` 表示调用者具备创建订单的能力；`risk="high"` 则要求用户对**这一笔**调用明确确认。Demo 的 `approved_call_ids` 绑定精确 `tool_call_id`；生产环境还应绑定用户、租户、工具版本、规范化参数哈希、过期时间与一次性重放状态。
+
+#### 运行与验证
+
+```bash
+cd ~/work/py/ai-agent/week02/2-2
+python3.12 mini_agent_loop.py
+```
+
+脚本完全离线，使用内存订单服务，运行时会打印 Provider Tool Schema、v1/v2 Snapshot、每个 `ToolCall` 与 `ToolResultMessage`、脱敏审计事件，并通过 `assert` 验证：
+
+- Snapshot 的版本冻结；
+- 旧版本实时停用不影响新版本；
+- Pydantic 拒绝额外参数；
+- Runtime 执行层拒绝无权限调用；
+- high-risk 订单必须先审批，审批后复用原始 ToolCall 执行；
+- 审计日志不保存原始参数值。
 
 ---
 
