@@ -2,6 +2,39 @@
 
 从零构建 AI Agent 的实践项目，覆盖 LLM 调用、Agent 循环、流式服务、结构化输出、持久化等核心能力。
 
+## 作业二：工具调用治理（Week 02）
+
+> 作业代码放在项目根目录下的 `week02/`，为便于学习和验收，Demo 与测试文件并列存放：
+
+```text
+week02/
+├── tool_governance_demo.py
+└── test_tool_governance.py
+```
+
+| 文件 | 内容 |
+|---|---|
+| `week02/tool_governance_demo.py` | 工具调用治理 Demo：Pydantic 参数校验、权限与高风险审批绑定、审批一次性消费、转账前置校验、超时与非幂等写操作不重试、账号/敏感字段脱敏、最小审计记录。 |
+| `week02/test_tool_governance.py` | 作业二的自动化验收测试：覆盖转账参数校验、余额不足、单笔限额、审批参数绑定、超时不重试，以及确认状态与结果脱敏的可观测性。 |
+
+### 运行作业二
+
+使用项目的 Conda 环境，在项目根目录执行：
+
+```bash
+conda run -n ai-agent python -m pytest week02/test_tool_governance.py -v -k "transfer"
+```
+
+预期：5 个转账验收测试全部通过。超时测试使用 `45000`：它大于慢调用阈值 `40000`、但不超过业务限额 `50000`，因此会进入 Handler 并在 `2s` Runtime 超时后返回 `TIMEOUT_UNKNOWN`；转账是非幂等写操作，不会自动重试。
+
+如需查看确认状态和脱敏结果：
+
+```bash
+conda run -n ai-agent python -m pytest week02/test_tool_governance.py -v -s -k "audit_and_confirm"
+```
+
+输出会显示未审批的高风险转账先返回 `CONFIRM / APPROVAL_REQUIRED`，成功结果中的账号显示为类似 `ACC-A-****3456` 的脱敏格式。审计记录默认只保留参数名而非参数值，避免存储原始账号等敏感信息。
+
 ## 快速开始
 
 ### 环境准备
