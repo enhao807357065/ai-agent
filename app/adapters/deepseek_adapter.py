@@ -65,6 +65,21 @@ class DeepSeekAnthropicModel(StreamingModel):
             })
         return anthropic_tools
 
+    def _convert_tool_choice(self, tool_choice: str | dict[str, Any] | None) -> dict[str, Any] | None:
+        """OpenAI tool_choice → Anthropic tool_choice；仅在调用方显式指定时透传。"""
+        if tool_choice is None or tool_choice == "auto":
+            return {"type": "auto"}
+        if tool_choice == "required":
+            return {"type": "any"}
+        if tool_choice == "none":
+            return None
+        if isinstance(tool_choice, dict):
+            function = tool_choice.get("function", {})
+            name = function.get("name")
+            if tool_choice.get("type") == "function" and isinstance(name, str):
+                return {"type": "tool", "name": name}
+        raise ValueError("Unsupported OpenAI tool_choice for Anthropic target")
+
     def _convert_messages(
         self,
         messages: list[dict[str, Any]],
@@ -153,6 +168,7 @@ class DeepSeekAnthropicModel(StreamingModel):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
         response_format: dict[str, Any] | None = None,
@@ -178,7 +194,9 @@ class DeepSeekAnthropicModel(StreamingModel):
 
         if tools:
             kwargs["tools"] = self._convert_tools(tools)
-            kwargs["tool_choice"] = {"type": "auto"}
+            converted_tool_choice = self._convert_tool_choice(tool_choice)
+            if converted_tool_choice is not None:
+                kwargs["tool_choice"] = converted_tool_choice
 
         # Thinking 模式
         if self._enable_thinking:
@@ -280,6 +298,7 @@ class DeepSeekAnthropicModel(StreamingModel):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
         response_format: dict[str, Any] | None = None,
@@ -305,7 +324,9 @@ class DeepSeekAnthropicModel(StreamingModel):
 
         if tools:
             kwargs["tools"] = self._convert_tools(tools)
-            kwargs["tool_choice"] = {"type": "auto"}
+            converted_tool_choice = self._convert_tool_choice(tool_choice)
+            if converted_tool_choice is not None:
+                kwargs["tool_choice"] = converted_tool_choice
 
         # Thinking 模式
         if self._enable_thinking:

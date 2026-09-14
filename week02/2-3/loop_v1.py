@@ -29,6 +29,7 @@ from mcp_types import CallToolResult
 from openai import AsyncOpenAI
 
 BASE_DIR = Path(__file__).parent
+print(f"BASE_DIR: {BASE_DIR}")
 load_dotenv(BASE_DIR / ".env")
 
 
@@ -96,18 +97,25 @@ class OpenAICompatibleProvider:
         if not api_key:
             raise RuntimeError("请先设置 TALAI_API_KEY，或不传 --llm 使用 DemoProvider")
 
+        # self.client = AsyncOpenAI(
+        #     api_key=api_key,
+        #     base_url=os.getenv("TALAI_BASE_URL", "https://api.deepseek.com"),
+        #     max_retries=0,
+        # )
+        # self.model = os.getenv("LLM_MODEL", "deepseek-v4-pro")
         self.client = AsyncOpenAI(
             api_key=api_key,
-            base_url=os.getenv("TALAI_BASE_URL", "https://api.deepseek.com"),
-            max_retries=0,
+            base_url="http://localhost:8000/v1"
         )
-        self.model = os.getenv("LLM_MODEL", "deepseek-v4-pro")
+        self.model = "chat-default"
 
     async def complete(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
     ) -> ModelReply:
+        print(f"messages: {messages}")
+        print(f"tools: {tools}")
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=messages,
@@ -255,6 +263,9 @@ def normalize_mcp_result(
     max_chars: int = 2_000,
 ) -> dict[str, Any]:
     """将 MCP SDK Result 转成大小受限的 Host payload。"""
+    print(f"normalize_mcp_result result: {result.model_dump_json()}")
+    print(f"structured_content: {result.structured_content}")
+    print(f"content: {result.content}")
     if result.is_error:
         text = getattr(result.content[0], "text", "MCP_TOOL_ERROR")
         return {"ok": False, "code": "MCP_TOOL_ERROR", "message": text[:max_chars]}

@@ -59,6 +59,24 @@ class GatewayCandidateSelector:
         *,
         excluded_target_ids: set[str] | None = None,
     ) -> list[CandidateTarget]:
+        """返回已排序的可执行候选；诊断信息请使用 ``select_with_diagnostics``。"""
+        candidates, _ = self.select_with_diagnostics(
+            logical_model,
+            call,
+            requirements,
+            excluded_target_ids=excluded_target_ids,
+        )
+        return candidates
+
+    def select_with_diagnostics(
+        self,
+        logical_model: str | None,
+        call: GatewayModelCall,
+        requirements: GatewayRequirements,
+        *,
+        excluded_target_ids: set[str] | None = None,
+    ) -> tuple[list[CandidateTarget], dict[str, str]]:
+        """返回候选及未入选 target 的稳定原因码，供 Router 记录路由决策。"""
         name, policy = self.resolve_policy(logical_model)
         required = requirements.capabilities | policy.required_capabilities
         excluded = excluded_target_ids or set()
@@ -118,5 +136,6 @@ class GatewayCandidateSelector:
                     values.append(-candidate.health_score)
             return (*values, candidate.profile.id)
 
+        # 数值越小，优先级越高
         candidates.sort(key=sort_key)
-        return candidates
+        return candidates, rejected

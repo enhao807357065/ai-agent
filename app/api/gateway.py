@@ -12,6 +12,7 @@ from collections.abc import AsyncIterator
 
 import structlog
 import asyncio
+import json
 from typing import Any, Literal
 
 from fastapi import APIRouter
@@ -34,6 +35,16 @@ from app.models.gateway import (
     GatewayResponseToolCallEvent,
     GatewayTextDelta,
     GatewayToolCallEvent,
+    OpenAIChatCompletionChoice,
+    OpenAIChatCompletionChunk,
+    OpenAIChatCompletionChunkChoice,
+    OpenAIChatCompletionDelta,
+    OpenAIChatCompletionFunctionCall,
+    OpenAIChatCompletionMessage,
+    OpenAIChatCompletionRequest,
+    OpenAIChatCompletionResponse,
+    OpenAIChatCompletionToolCall,
+    OpenAIChatCompletionUsage,
 )
 from app.services.gateway_candidate_selector import GatewayCapabilityUnavailable
 from app.services.gateway_structured_output_validator import (
@@ -183,7 +194,7 @@ def _resolved_messages(request: GatewayRequest) -> list[dict[str, Any]]:
 
 
 def _to_model_call(request: GatewayRequest) -> GatewayModelCall:
-    """公共 HTTP 请求 → Router 的内部调用 Command。"""
+    """Gateway 自有 HTTP 请求 → Router 的内部调用 Command。"""
     return GatewayModelCall(
         messages=_resolved_messages(request),
         tools=[
@@ -197,6 +208,42 @@ def _to_model_call(request: GatewayRequest) -> GatewayModelCall:
         max_tokens=request.max_tokens,
         response_format=request.response_format,
     )
+
+
+def _openai_to_model_call(request: OpenAIChatCompletionRequest) -> GatewayModelCall:
+    """OpenAI Chat Completions 请求 → Gateway canonical call。"""
+    max_tokens = request.max_completion_tokens or request.max_tokens or 4096
+    return GatewayModelCall(
+        messages=[message.model_dump(exclude_none=True) for message in request.messages],
+        tools=[tool.model_dump() for tool in request.tools] if request.tools else None,
+        tool_choice=request.tool_choice,
+        temperature=request.temperature,
+        max_tokens=max_tokens,
+        response_format=request.response_format,
+    )
+
+
+def _openai_usage(usage) -> OpenAIChatCompletionUsage:
+    return OpenAIChatCompletionUsage(
+        prompt_tokens=usage.input_tokens,
+        completion_tokens=usage.output_tokens,
+        total_tokens=usage.total_tokens,
+    )
+
+
+def _openai_tool_calls(tool_calls) -> list[OpenAIChatCompletionToolCall] | None:
+    if not tool_calls:
+        return None
+    return [
+        OpenAIChatCompletionToolCall(
+            id=tool.id,
+            function=OpenAIChatCompletionFunctionCall(
+                name=tool.name,
+                arguments=json.dumps(tool.arguments, ensure_ascii=False),
+            ),
+        )
+        for tool in tool_calls
+    ]
 
 
 @router.get("/v1/models", response_model=GatewayModelsResponse)
@@ -375,10 +422,116 @@ async def _handle_gateway(request: GatewayRequest) -> GatewayResponse | JSONResp
     )
 
 
-# 三条路径保持可访问，但它们不再代表三个外部厂商协议。
-@router.post("/v1/chat/completions", response_model=GatewayResponse)
-async def chat_completions(request: GatewayRequest) -> GatewayResponse | JSONResponse | StreamingResponse:
-    return await _handle_gateway(request)
+async def _openai_chat_response(
+    request: OpenAIChatCompletionRequest,
+    *,
+    request_id: str,
+    request_started: float,
+) -> OpenAIChatCompletionResponse | JSONResponse:
+    """OpenAI Chat Completions 非流式编码。"""
+    try:
+        result = await gateway_model_router.complete(request.model, _openai_to_model_call(request))
+    except Exception as exc:
+        return _error_response(exc)
+
+    return OpenAIChatCompletionResponse(
+        id=request_id,
+        created=_now(),
+        model=request.model,
+        choices=[OpenAIChatCompletionChoice(
+            message=OpenAIChatCompletionMessage(
+                content=result.content or None,
+                tool_calls=_openai_tool_calls(result.tool_calls),
+            ),
+            finish_reason=result.finish_reason,
+        )],
+        usage=_openai_usage(result.usage),
+    )
+
+
+async def _stream_openai_chat_response(
+    request: OpenAIChatCompletionRequest,
+    *,
+    request_id: str,
+    request_started: float,
+) -> AsyncIterator[str]:
+    """OpenAI Chat Completions SSE：chunk + [DONE]。"""
+    sent_role = False
+    tool_index = 0
+    try:
+        async for event in gateway_model_router.stream(request.model, _openai_to_model_call(request)):
+            if isinstance(event, GatewayTextDelta):
+                delta = OpenAIChatCompletionDelta(
+                    role="assistant" if not sent_role else None,
+                    content=event.content,
+                )
+                sent_role = True
+                yield _sse(OpenAIChatCompletionChunk(
+                    id=request_id, created=_now(), model=request.model,
+                    choices=[OpenAIChatCompletionChunkChoice(delta=delta)],
+                ))
+            elif isinstance(event, GatewayToolCallEvent):
+                delta = OpenAIChatCompletionDelta(
+                    role="assistant" if not sent_role else None,
+                    tool_calls=[{
+                        "index": tool_index,
+                        "id": event.tool_call.id,
+                        "type": "function",
+                        "function": {
+                            "name": event.tool_call.name,
+                            "arguments": json.dumps(event.tool_call.arguments, ensure_ascii=False),
+                        },
+                    }],
+                )
+                sent_role = True
+                tool_index += 1
+                yield _sse(OpenAIChatCompletionChunk(
+                    id=request_id, created=_now(), model=request.model,
+                    choices=[OpenAIChatCompletionChunkChoice(delta=delta)],
+                ))
+            elif isinstance(event, GatewayCompletedEvent):
+                yield _sse(OpenAIChatCompletionChunk(
+                    id=request_id, created=_now(), model=request.model,
+                    choices=[OpenAIChatCompletionChunkChoice(
+                        delta=OpenAIChatCompletionDelta(),
+                        finish_reason=event.finish_reason,
+                    )],
+                ))
+                yield "data: [DONE]\n\n"
+    except Exception as exc:
+        _, error = _gateway_error(exc, stream_started=sent_role)
+        yield _sse(OpenAIChatCompletionChunk(
+            id=request_id, created=_now(), model=request.model,
+            choices=[OpenAIChatCompletionChunkChoice(
+                delta=OpenAIChatCompletionDelta(content=f"[gateway error: {error.code}]"),
+                finish_reason="stop",
+            )],
+        ))
+        yield "data: [DONE]\n\n"
+
+
+async def _handle_openai_chat(request: OpenAIChatCompletionRequest) -> OpenAIChatCompletionResponse | JSONResponse | StreamingResponse:
+    request_id = _id("chatcmpl")
+    request_started = time.perf_counter()
+    try:
+        gateway_model_router.resolve(request.model)
+        json_schema_from_call(_openai_to_model_call(request))
+    except Exception as exc:
+        return _error_response(exc)
+
+    if request.stream:
+        return StreamingResponse(
+            _stream_openai_chat_response(request, request_id=request_id, request_started=request_started),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    return await _openai_chat_response(request, request_id=request_id, request_started=request_started)
+
+
+@router.post("/v1/chat/completions", response_model=OpenAIChatCompletionResponse)
+async def chat_completions(request: OpenAIChatCompletionRequest) -> OpenAIChatCompletionResponse | JSONResponse | StreamingResponse:
+    """OpenAI Chat Completions 兼容入口，供 OpenAI SDK / Agent Loop 直接调用。"""
+    return await _handle_openai_chat(request)
 
 
 @router.post("/v1/responses", response_model=GatewayResponse)

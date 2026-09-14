@@ -33,6 +33,7 @@ class GatewayModelCall(BaseModel):
 
     messages: list[dict[str, Any]] = Field(min_length=1)
     tools: list[dict[str, Any]] | None = None
+    tool_choice: str | dict[str, Any] | None = None
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     max_tokens: int = Field(default=4096, gt=0)
     response_format: dict[str, Any] | None = None
@@ -125,6 +126,95 @@ class GatewayFunctionTool(BaseModel):
     parameters: dict[str, Any] = Field(
         default_factory=lambda: {"type": "object", "properties": {}},
     )
+
+
+class OpenAIChatFunctionTool(BaseModel):
+    """OpenAI Chat Completions 的 function 工具外壳。"""
+
+    type: Literal["function"]
+    function: GatewayFunctionTool
+
+
+class OpenAIChatMessage(BaseModel):
+    """OpenAI Chat Completions message；保留 tool call 原始 JSON 字符串。"""
+
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str | None = None
+    tool_call_id: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+
+
+class OpenAIChatCompletionRequest(BaseModel):
+    """真正兼容 OpenAI Chat Completions 的公开请求契约。"""
+
+    model: str = Field(min_length=1, description="网关暴露的逻辑模型名")
+    messages: list[OpenAIChatMessage] = Field(min_length=1)
+    tools: list[OpenAIChatFunctionTool] | None = None
+    tool_choice: str | dict[str, Any] | None = None
+    stream: bool = False
+    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, gt=0.0, le=1.0)
+    max_tokens: int | None = Field(default=None, gt=0)
+    max_completion_tokens: int | None = Field(default=None, gt=0)
+    response_format: dict[str, Any] | None = None
+
+
+class OpenAIChatCompletionFunctionCall(BaseModel):
+    name: str
+    arguments: str
+
+
+class OpenAIChatCompletionToolCall(BaseModel):
+    id: str
+    type: Literal["function"] = "function"
+    function: OpenAIChatCompletionFunctionCall
+
+
+class OpenAIChatCompletionMessage(BaseModel):
+    role: Literal["assistant"] = "assistant"
+    content: str | None = None
+    tool_calls: list[OpenAIChatCompletionToolCall] | None = None
+
+
+class OpenAIChatCompletionChoice(BaseModel):
+    index: int = 0
+    message: OpenAIChatCompletionMessage
+    finish_reason: Literal["stop", "tool_calls", "length"]
+
+
+class OpenAIChatCompletionUsage(BaseModel):
+    prompt_tokens: int = Field(ge=0)
+    completion_tokens: int = Field(ge=0)
+    total_tokens: int = Field(ge=0)
+
+
+class OpenAIChatCompletionResponse(BaseModel):
+    id: str
+    object: Literal["chat.completion"] = "chat.completion"
+    created: int = Field(ge=0)
+    model: str
+    choices: list[OpenAIChatCompletionChoice]
+    usage: OpenAIChatCompletionUsage
+
+
+class OpenAIChatCompletionDelta(BaseModel):
+    role: Literal["assistant"] | None = None
+    content: str | None = None
+    tool_calls: list[dict[str, Any]] | None = None
+
+
+class OpenAIChatCompletionChunkChoice(BaseModel):
+    index: int = 0
+    delta: OpenAIChatCompletionDelta
+    finish_reason: Literal["stop", "tool_calls", "length"] | None = None
+
+
+class OpenAIChatCompletionChunk(BaseModel):
+    id: str
+    object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
+    created: int = Field(ge=0)
+    model: str
+    choices: list[OpenAIChatCompletionChunkChoice]
 
 
 class PromptReference(BaseModel):

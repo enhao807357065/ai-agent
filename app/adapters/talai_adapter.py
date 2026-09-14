@@ -43,6 +43,7 @@ class TalAIStreamingModel(StreamingModel):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
         response_format: dict[str, Any] | None = None,
@@ -59,7 +60,7 @@ class TalAIStreamingModel(StreamingModel):
 
         if tools:
             kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
+            kwargs["tool_choice"] = tool_choice or "auto"
 
         if response_format:
             kwargs["response_format"] = response_format
@@ -136,6 +137,7 @@ class TalAIStreamingModel(StreamingModel):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
         response_format: dict[str, Any] | None = None,
@@ -152,7 +154,7 @@ class TalAIStreamingModel(StreamingModel):
 
         if tools:
             kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
+            kwargs["tool_choice"] = tool_choice or "auto"
 
         if response_format:
             kwargs["response_format"] = response_format

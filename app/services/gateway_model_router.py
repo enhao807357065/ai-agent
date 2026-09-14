@@ -155,21 +155,37 @@ class GatewayModelRouter:
 
     def _candidates(self, logical_model: str | None, call: GatewayModelCall, *, stream: bool) -> tuple[str, list[CandidateTarget]]:
         try:
-            name, _ = self._selector.resolve_policy(logical_model)
+            name, policy = self._selector.resolve_policy(logical_model)
         except GatewayCapabilityUnavailable as exc:
             raise GatewayRoutingError(str(exc)) from exc
 
-        candidates = self._selector.select(
+        requirements = requirements_from_call(call, stream=stream)
+        candidates, rejected_targets = self._selector.select_with_diagnostics(
             logical_model,
             call,
-            requirements_from_call(call, stream=stream),
+            requirements,
         )
         logger.info(
             "gateway.candidates_selected",
             logical_model=name,
             stream=stream,
+            required_capabilities=sorted(capability.value for capability in requirements.capabilities | policy.required_capabilities),
+            selection_order=policy.selection_order,
             selected_target=candidates[0].profile.id,
             eligible_targets=[candidate.profile.id for candidate in candidates],
+            candidates=[
+                {
+                    "rank": rank,
+                    "target_id": candidate.profile.id,
+                    "provider": candidate.profile.provider,
+                    "upstream_model": candidate.profile.model,
+                    "priority": candidate.profile.priority,
+                    "estimated_cost": str(candidate.estimated_cost),
+                    "health_score": candidate.health_score,
+                }
+                for rank, candidate in enumerate(candidates, start=1)
+            ],
+            rejected_targets=rejected_targets,
         )
         return name, candidates
 
@@ -203,7 +219,7 @@ class GatewayModelRouter:
                         target_attempt=target_attempt,
                         total_attempts=total_attempts,
                     )
-                    completion = await model.complete(**call.model_dump())
+                    completion = await model.complete(**call.model_dump(exclude_none=True))
                     validate_structured_output(completion.content, call)
                     attempt_latency_ms = (time.perf_counter() - attempt_started) * 1000
                     self._health.record_success(candidate.profile.id, attempt_latency_ms)
@@ -298,7 +314,7 @@ class GatewayModelRouter:
                         target_attempt=target_attempt,
                         total_attempts=total_attempts,
                     )
-                    async for chunk in model.stream(**call.model_dump()):
+                    async for chunk in model.stream(**call.model_dump(exclude_none=True)):
                         if isinstance(chunk, TextChunk):
                             if not emitted_output:
                                 ttft_ms = round((time.perf_counter() - request_started) * 1000)

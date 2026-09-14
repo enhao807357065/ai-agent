@@ -71,6 +71,7 @@ class FakeModel(StreamingModel):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
         response_format: dict[str, Any] | None = None,
@@ -86,6 +87,7 @@ class FakeModel(StreamingModel):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
         response_format: dict[str, Any] | None = None,
@@ -177,7 +179,7 @@ def test_gateway_prompt_reference_renders_canonical_system_message(monkeypatch):
     }
 
     with TestClient(create_app()) as client:
-        response = client.post("/v1/chat/completions", json=body)
+        response = client.post("/v1/responses", json=body)
 
     assert response.status_code == 200
     assert len(captured_calls) == 1
@@ -198,7 +200,7 @@ def test_gateway_prompt_reference_rejects_unknown_version_without_calling_router
     body["prompt"] = {"id": "missing-v1"}
 
     with TestClient(create_app()) as client:
-        response = client.post("/v1/chat/completions", json=body)
+        response = client.post("/v1/responses", json=body)
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_prompt_reference"
@@ -213,7 +215,7 @@ def test_gateway_prompt_reference_rejects_unsupported_variable(monkeypatch):
     body["prompt"] = {"id": "coder-v1", "variables": {"tenant_id": "other-tenant"}}
 
     with TestClient(create_app()) as client:
-        response = client.post("/v1/chat/completions", json=body)
+        response = client.post("/v1/responses", json=body)
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_prompt_reference"
@@ -232,7 +234,7 @@ def test_gateway_prompt_reference_rejects_caller_system_message(monkeypatch):
     ]
 
     with TestClient(create_app()) as client:
-        response = client.post("/v1/chat/completions", json=body)
+        response = client.post("/v1/responses", json=body)
 
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "invalid_prompt_reference"
@@ -327,35 +329,49 @@ def test_gateway_http_stream_observation_contains_ttft(monkeypatch):
     assert event["request_id"] == events[-1]["id"]
 
 
-def test_all_gateway_paths_share_one_nonstream_contract(monkeypatch):
+def test_chat_completions_uses_openai_nonstream_contract(monkeypatch):
     with client_with_fake_router(monkeypatch) as client:
-        responses = [client.post(path, json=gateway_request()) for path in (
-            "/v1/chat/completions", "/v1/responses", "/v1/messages",
-        )]
+        response = client.post("/v1/chat/completions", json=gateway_request())
+    assert response.status_code == 200
+    data = response.json()
+    assert data["object"] == "chat.completion"
+    assert data["model"] == "chat-default"
+    assert data["choices"][0]["message"] == {"role": "assistant", "content": "hello", "tool_calls": None}
+    assert data["usage"] == {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+
+
+def test_responses_and_messages_keep_gateway_contract(monkeypatch):
+    with client_with_fake_router(monkeypatch) as client:
+        responses = [client.post(path, json=gateway_request()) for path in ("/v1/responses", "/v1/messages")]
     for response in responses:
         assert response.status_code == 200
         data = response.json()
         assert data["object"] == "gateway.response"
-        assert data["model"] == "chat-default"
         assert data["content"] == "hello"
-        assert data["usage"] == {"input_tokens": 3, "output_tokens": 2}
 
 
-def test_all_gateway_paths_share_one_stream_contract(monkeypatch):
+def test_chat_completions_uses_openai_stream_contract(monkeypatch):
+    tool = {"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}
+    with client_with_fake_router(monkeypatch) as client:
+        response = client.post("/v1/chat/completions", json=gateway_request(stream=True, tools=[tool]))
+    assert response.status_code == 200
+    lines = [line[6:] for line in response.text.splitlines() if line.startswith("data: ")]
+    events = [json.loads(line) for line in lines if line != "[DONE]"]
+    assert events[0]["object"] == "chat.completion.chunk"
+    assert events[0]["choices"][0]["delta"] == {"role": "assistant", "content": "hello", "tool_calls": None}
+    assert events[1]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "get_weather"
+    assert events[-1]["choices"][0]["finish_reason"] == "tool_calls"
+    assert lines[-1] == "[DONE]"
+
+
+def test_responses_and_messages_keep_gateway_stream_contract(monkeypatch):
     tool = {"name": "get_weather", "parameters": {"type": "object"}}
     with client_with_fake_router(monkeypatch) as client:
-        responses = [client.post(path, json=gateway_request(stream=True, tools=[tool])) for path in (
-            "/v1/chat/completions", "/v1/responses", "/v1/messages",
-        )]
+        responses = [client.post(path, json=gateway_request(stream=True, tools=[tool])) for path in ("/v1/responses", "/v1/messages")]
     for response in responses:
         assert response.status_code == 200
         events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
-        assert [event["type"] for event in events] == [
-            "gateway.text.delta", "gateway.tool_call.completed", "gateway.completed",
-        ]
-        assert events[0]["content"] == "hello"
-        assert events[1]["tool_call"]["name"] == "get_weather"
-        assert events[-1]["usage"] == {"input_tokens": 3, "output_tokens": 2}
+        assert [event["type"] for event in events] == ["gateway.text.delta", "gateway.tool_call.completed", "gateway.completed"]
 
 
 def test_gateway_request_and_logical_model_validation(monkeypatch):
@@ -441,7 +457,7 @@ def test_stream_failure_emits_gateway_error_event(monkeypatch):
     import app.api.gateway as gateway
     monkeypatch.setattr(gateway, "gateway_model_router", InterruptedRouter())
     with TestClient(create_app()) as client:
-        response = client.post("/v1/chat/completions", json=gateway_request(stream=True))
+        response = client.post("/v1/responses", json=gateway_request(stream=True))
 
     assert response.status_code == 200
     events = [json.loads(line[6:]) for line in response.text.splitlines() if line.startswith("data: ")]
@@ -509,12 +525,12 @@ def test_complete_retries_same_target_with_exponential_backoff_before_success(mo
     delays: list[float] = []
 
     class FlakyModel(FakeModel):
-        async def complete(self, messages, tools=None, temperature=0.7, max_tokens=4096, response_format=None):
+        async def complete(self, messages, tools=None, tool_choice=None, temperature=0.7, max_tokens=4096, response_format=None):
             nonlocal calls
             calls += 1
             if calls < 3:
                 raise ConnectionError("temporary failure")
-            return await super().complete(messages, tools, temperature, max_tokens, response_format)
+            return await super().complete(messages, tools, tool_choice, temperature, max_tokens, response_format)
 
     async def record_sleep(delay: float) -> None:
         delays.append(delay)
@@ -549,14 +565,14 @@ def test_complete_retries_primary_before_fallback(monkeypatch):
     delays: list[float] = []
 
     class FailingModel(FakeModel):
-        async def complete(self, messages, tools=None, temperature=0.7, max_tokens=4096, response_format=None):
+        async def complete(self, messages, tools=None, tool_choice=None, temperature=0.7, max_tokens=4096, response_format=None):
             calls.append("primary")
             raise ConnectionError("primary unavailable")
 
     class SuccessfulFallback(FakeModel):
-        async def complete(self, messages, tools=None, temperature=0.7, max_tokens=4096, response_format=None):
+        async def complete(self, messages, tools=None, tool_choice=None, temperature=0.7, max_tokens=4096, response_format=None):
             calls.append("fallback")
-            return await super().complete(messages, tools, temperature, max_tokens, response_format)
+            return await super().complete(messages, tools, tool_choice, temperature, max_tokens, response_format)
 
     async def record_sleep(delay: float) -> None:
         delays.append(delay)
@@ -620,7 +636,64 @@ def test_complete_falls_back_to_next_target(monkeypatch):
     assert created == ["primary", "fallback"]
 
 
-def test_gateway_completed_observation_contains_target_usage_latency_and_attempts(monkeypatch):
+def test_candidate_selection_observation_explains_sorting_and_rejections(monkeypatch):
+    import app.services.gateway_model_router as router_module
+
+    targets = {
+        "talai/preferred": TargetProfile(
+            id="talai/preferred", provider="talai", model="preferred",
+            capabilities={ModelCapability.CHAT}, priority=20,
+            input_cost_per_million=Decimal("2"), output_cost_per_million=Decimal("8"),
+        ),
+        "deepseek/selected": TargetProfile(
+            id="deepseek/selected", provider="deepseek", model="selected",
+            capabilities={ModelCapability.CHAT}, priority=10,
+            input_cost_per_million=Decimal("1"), output_cost_per_million=Decimal("4"),
+        ),
+        "talai/disabled": TargetProfile(
+            id="talai/disabled", provider="talai", model="disabled",
+            capabilities={ModelCapability.CHAT}, priority=1, enabled=False,
+        ),
+    }
+    monkeypatch.setattr(router_module, "create_model_for_target", lambda _target: FakeModel("selected"))
+    router = GatewayModelRouter(selector_for(
+        targets,
+        RoutingPolicy(target_ids=["talai/preferred", "deepseek/selected", "talai/disabled"]),
+    ))
+
+    with capture_logs() as logs:
+        result = asyncio.run(router.complete(
+            "chat-default", GatewayModelCall(messages=[{"role": "user", "content": "hi"}])
+        ))
+
+    event = next(item for item in logs if item["event"] == "gateway.candidates_selected")
+    assert result.route.target_id == "deepseek/selected"
+    assert event["required_capabilities"] == ["chat"]
+    assert event["selection_order"] == ("priority", "estimated_cost", "health")
+    assert event["selected_target"] == "deepseek/selected"
+    assert event["rejected_targets"] == {"talai/disabled": "disabled"}
+    assert event["candidates"] == [
+        {
+            "rank": 1,
+            "target_id": "deepseek/selected",
+            "provider": "deepseek",
+            "upstream_model": "selected",
+            "priority": 10,
+            "estimated_cost": "0.016385",
+            "health_score": 1.0,
+        },
+        {
+            "rank": 2,
+            "target_id": "talai/preferred",
+            "provider": "talai",
+            "upstream_model": "preferred",
+            "priority": 20,
+            "estimated_cost": "0.03277",
+            "health_score": 1.0,
+        },
+    ]
+
+
     import app.services.gateway_model_router as router_module
 
     targets = {
@@ -660,7 +733,7 @@ def test_gateway_failed_observation_contains_attempts_and_error(monkeypatch):
     }
 
     class UnavailableModel(FakeModel):
-        async def complete(self, messages, tools=None, temperature=0.7, max_tokens=4096, response_format=None):
+        async def complete(self, messages, tools=None, tool_choice=None, temperature=0.7, max_tokens=4096, response_format=None):
             raise ConnectionError("upstream unavailable")
 
     async def no_wait(_delay: float) -> None:
@@ -704,7 +777,7 @@ def test_stream_retries_before_first_output_then_falls_back(monkeypatch):
     delays: list[float] = []
 
     class FailingBeforeOutput(FakeModel):
-        def stream(self, messages, tools=None, temperature=0.7, max_tokens=4096, response_format=None):
+        def stream(self, messages, tools=None, tool_choice=None, temperature=0.7, max_tokens=4096, response_format=None):
             async def generate():
                 calls.append("primary")
                 raise ConnectionError("no first token")
@@ -925,7 +998,7 @@ def test_json_object_nonstream_output_requires_valid_object_root(monkeypatch):
             super().__init__()
             self._content = content
 
-        async def complete(self, messages, tools=None, temperature=0.7, max_tokens=4096, response_format=None):
+        async def complete(self, messages, tools=None, tool_choice=None, temperature=0.7, max_tokens=4096, response_format=None):
             return CompletionResult(self._content, [], "stop", 3, 2)
 
     call = GatewayModelCall(

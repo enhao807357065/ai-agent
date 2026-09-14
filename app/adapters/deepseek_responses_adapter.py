@@ -139,6 +139,16 @@ class DeepSeekResponsesModel(StreamingModel):
             })
         return responses_tools
 
+    def _convert_tool_choice(self, tool_choice: str | dict[str, Any] | None) -> str | dict[str, Any] | None:
+        """OpenAI Chat tool_choice → Responses API tool_choice。"""
+        if not isinstance(tool_choice, dict):
+            return tool_choice
+        function = tool_choice.get("function", {})
+        name = function.get("name")
+        if tool_choice.get("type") == "function" and isinstance(name, str):
+            return {"type": "function", "name": name}
+        raise ValueError("Unsupported OpenAI tool_choice for Responses target")
+
     def _build_input_kwarg(self, input_items: list[dict[str, Any]]) -> Any:
         """
         构造 input 参数：单条 user 文本消息时用简单字符串，否则用 item 列表
@@ -157,6 +167,7 @@ class DeepSeekResponsesModel(StreamingModel):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
         response_format: dict[str, Any] | None = None,
@@ -178,6 +189,9 @@ class DeepSeekResponsesModel(StreamingModel):
 
         if tools:
             kwargs["tools"] = self._convert_tools(tools)
+            converted_tool_choice = self._convert_tool_choice(tool_choice)
+            if converted_tool_choice is not None:
+                kwargs["tool_choice"] = converted_tool_choice
 
         # Reasoning 配置
         if self._reasoning_effort and self._reasoning_effort != "none":
@@ -295,6 +309,7 @@ class DeepSeekResponsesModel(StreamingModel):
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
+        tool_choice: str | dict[str, Any] | None = None,
         temperature: float = 0.7,
         max_tokens: int = 4096,
         response_format: dict[str, Any] | None = None,
@@ -316,6 +331,9 @@ class DeepSeekResponsesModel(StreamingModel):
 
         if tools:
             kwargs["tools"] = self._convert_tools(tools)
+            converted_tool_choice = self._convert_tool_choice(tool_choice)
+            if converted_tool_choice is not None:
+                kwargs["tool_choice"] = converted_tool_choice
 
         # Reasoning 配置
         if self._reasoning_effort and self._reasoning_effort != "none":
