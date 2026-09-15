@@ -9,6 +9,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from types import MappingProxyType
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -72,7 +73,13 @@ class ToolPolicy:
 class StrictArgs(BaseModel):
     """模型只能提交 Schema 允许的业务候选参数。"""
 
-    model_config = ConfigDict(extra="forbid", strict=True)
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+
+class StrictOutput(BaseModel):
+    """Handler 返回值必须经过白名单输出契约后才能进入模型上下文。"""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
 
 class GetOrderArgs(StrictArgs):
@@ -96,7 +103,36 @@ class TransferArgs(StrictArgs):
     amount: float = Field(gt=0, le=100000)
 
 
-ArgsModel = GetOrderArgs | CreateRefundArgs | RunShellArgs | TransferArgs
+class GetOrderOutput(StrictOutput):
+    status: str
+    refundable: float
+    customer_email: str
+
+
+class CreateRefundOutput(StrictOutput):
+    refund_id: str
+    idempotency_key: str
+    tenant_id: str
+    order_id: str
+    amount: float
+    status: str
+
+
+class RunShellOutput(StrictOutput):
+    simulated: bool
+    command: str
+    stdout: str
+
+
+class TransferOutput(StrictOutput):
+    txn_id: str
+    from_account: str = Field(validation_alias="from", serialization_alias="from")
+    to_account: str = Field(validation_alias="to", serialization_alias="to")
+    amount: float
+    status: str
+
+
+ArgsModel = StrictArgs
 Handler = Callable[[str, ArgsModel, ExecutionContext], Awaitable[Mapping[str, Any]]]
 Precheck = Callable[[ArgsModel, ExecutionContext], Awaitable[None]]
 CanonicalTarget = Callable[[ArgsModel], str]
@@ -105,8 +141,10 @@ CanonicalTarget = Callable[[ArgsModel], str]
 @dataclass(frozen=True, slots=True)
 class ToolDefinition:
     name: str
+    version: str
     description: str
     parameters_model: type[StrictArgs]
+    output_model: type[StrictOutput]
     policy: ToolPolicy
     handler: Handler
     canonical_target: CanonicalTarget
@@ -123,6 +161,70 @@ class ToolDefinition:
                 "parameters": self.parameters_model.model_json_schema(),
             },
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ToolSnapshot:
+    """一次 Run 固化的 name -> ToolDefinition 路由；模型永远看不到 version。"""
+
+    routes: Mapping[str, ToolDefinition]
+    revision: int
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "routes", MappingProxyType(dict(self.routes)))
+
+
+class ToolRegistry:
+    """控制面：管理版本、按路由生成 Snapshot、维护实时 family/version kill switch。"""
+
+    def __init__(self) -> None:
+        self._tools: dict[tuple[str, str], ToolDefinition] = {}
+        self._family_enabled: dict[str, bool] = {}
+        self._version_enabled: dict[tuple[str, str], bool] = {}
+        self._revision = 0
+
+    def register(self, tool: ToolDefinition) -> None:
+        key = (tool.name, tool.version)
+        if key in self._tools:
+            raise ValueError(f"工具版本已注册：{tool.name}@{tool.version}")
+        self._tools[key] = tool
+        self._family_enabled.setdefault(tool.name, True)
+        self._version_enabled.setdefault(key, True)
+        self._revision += 1
+
+    def set_family_enabled(self, name: str, enabled: bool) -> None:
+        self._require_family(name)
+        self._family_enabled[name] = enabled
+        self._revision += 1
+
+    def set_version_enabled(self, name: str, version: str, enabled: bool) -> None:
+        self._require_tool(name, version)
+        self._version_enabled[(name, version)] = enabled
+        self._revision += 1
+
+    def is_live_enabled(self, tool: ToolDefinition) -> bool:
+        return self._family_enabled.get(tool.name, False) and self._version_enabled.get(
+            (tool.name, tool.version), False
+        )
+
+    def snapshot(self, routes: Mapping[str, str]) -> ToolSnapshot:
+        selected: dict[str, ToolDefinition] = {}
+        for name, version in routes.items():
+            tool = self._require_tool(name, version)
+            if not self.is_live_enabled(tool):
+                raise ValueError(f"工具当前不可路由：{name}@{version}")
+            selected[name] = tool
+        return ToolSnapshot(routes=selected, revision=self._revision)
+
+    def _require_family(self, name: str) -> None:
+        if not any(registered_name == name for registered_name, _ in self._tools):
+            raise KeyError(f"未知工具族：{name}")
+
+    def _require_tool(self, name: str, version: str) -> ToolDefinition:
+        try:
+            return self._tools[(name, version)]
+        except KeyError as error:
+            raise KeyError(f"未知工具版本：{name}@{version}") from error
 
 
 # 针对某个工具、可进一步限定到某类资源目标的规则
@@ -151,6 +253,17 @@ class ToolCall:
 
 
 @dataclass(frozen=True, slots=True)
+class WaitingForApproval:
+    """被冻结的待审批调用；确认后只能恢复这一条原始调用。"""
+
+    call: ToolCall
+    tool_version: str
+    arguments: ArgsModel
+    context: ExecutionContext
+    approval_prompt: str
+
+
+@dataclass(frozen=True, slots=True)
 class ToolResult:
     tool_call_id: str
     tool_name: str
@@ -169,7 +282,7 @@ class ToolResult:
                     "ok": self.ok,
                     "code": self.code,
                     "action": self.action,
-                    "content": self.content,
+                    "content": _json_value(self.content),
                 },
                 ensure_ascii=False,
             ),
@@ -196,15 +309,35 @@ class ApprovalRecord:
     user_id: str
     tenant_id: str
     tool_name: str
+    tool_version: str
+    tool_call_id: str
     digest: str
     expires_at: float
     used: bool = False
 
 
-class PolicyDenied(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+class ToolExecutionError(RuntimeError):
+    """业务 Handler 可安全映射到统一 ToolError 的预期失败。"""
+
+    def __init__(self, code: str, message: str, *, retryable: bool = False) -> None:
         super().__init__(message)
         self.code = code
+        self.retryable = retryable
+
+
+class PolicyDenied(ToolExecutionError):
+    """教学 Demo 中的业务拒绝；兼容原有 Handler / precheck 名称。"""
+
+
+class ToolError(BaseModel):
+    """唯一允许返回模型的安全错误契约。"""
+
+    model_config = ConfigDict(frozen=True)
+
+    code: str
+    message: str
+    retryable: bool = False
+    trace_id: str | None = None
 
 
 class TransientToolError(RuntimeError):
@@ -221,6 +354,14 @@ def _stable_value(value: Any) -> Any:
     return value
 
 
+def _json_value(value: Any) -> Any:
+    """把 Pydantic 对象投影为 JSON 可序列化的模型消息内容。"""
+
+    if isinstance(value, BaseModel):
+        return value.model_dump(mode="json")
+    return value
+
+
 # 本身不负责防止“多次相同参数的业务操作”。它负责的是另一件事： 防止用户批准 A 动作后，审批被偷换成 B 动作执行。
 def _approval_digest(tool_name: str, arguments: ArgsModel | Mapping[str, Any]) -> str:
     canonical = json.dumps(_stable_value(arguments), ensure_ascii=False, separators=(",", ":"))
@@ -234,18 +375,20 @@ class ApprovalStore:
     def approve(
         self,
         approval_id: str,
-        context: ExecutionContext,
-        tool_name: str,
-        arguments: ArgsModel | Mapping[str, Any],
+        pending: WaitingForApproval,
         *,
         ttl_seconds: float = 300,
     ) -> None:
+        """只为已校验且冻结的原始 ToolCall 创建审批记录。"""
+
         self._records[approval_id] = ApprovalRecord(
             approval_id=approval_id,
-            user_id=context.user_id,
-            tenant_id=context.tenant_id,
-            tool_name=tool_name,
-            digest=_approval_digest(tool_name, arguments),
+            user_id=pending.context.user_id,
+            tenant_id=pending.context.tenant_id,
+            tool_name=pending.call.name,
+            tool_version=pending.tool_version,
+            tool_call_id=pending.call.tool_call_id,
+            digest=_approval_digest(pending.call.name, pending.arguments),
             expires_at=time.time() + ttl_seconds,
         )
 
@@ -253,7 +396,8 @@ class ApprovalStore:
         self,
         approval_id: str | None,
         context: ExecutionContext,
-        tool_name: str,
+        tool: ToolDefinition,
+        call: ToolCall,
         arguments: ArgsModel,
     ) -> bool:
         record = self._records.get(approval_id or "")
@@ -263,8 +407,10 @@ class ApprovalStore:
             and record.expires_at >= time.time()
             and record.user_id == context.user_id
             and record.tenant_id == context.tenant_id
-            and record.tool_name == tool_name
-            and record.digest == _approval_digest(tool_name, arguments)
+            and record.tool_name == tool.name
+            and record.tool_version == tool.version
+            and record.tool_call_id == call.tool_call_id
+            and record.digest == _approval_digest(tool.name, arguments)
         )
         if valid and record:
             record.used = True
@@ -324,6 +470,7 @@ class PermissionEngine:
     async def decide(
         self,
         tool: ToolDefinition,
+        call: ToolCall,
         arguments: ArgsModel,
         context: ExecutionContext,
     ) -> PermissionDecision:
@@ -362,16 +509,23 @@ class PermissionEngine:
                 "rbac",
             )
 
-        # 5. 资源归属、状态和额度在 handler 之前验证。
+        # 5. 资源归属、状态和额度在 handler 之前验证；未知异常必须 fail closed。
         try:
             if tool.precheck:
                 await tool.precheck(arguments, context)
         except PolicyDenied as error:
             return PermissionDecision(DecisionAction.DENY, error.code, str(error), "business")
+        except Exception:
+            return PermissionDecision(
+                DecisionAction.DENY,
+                "PRECHECK_FAILED",
+                "业务前置校验暂时不可用",
+                "business",
+            )
 
         # 6. 高风险业务写操作必须使用一次性、参数绑定审批。
         if tool.policy.requires_approval or tool.policy.risk is Risk.HIGH:
-            if self._approvals.consume(context.approval_id, context, tool.name, arguments):
+            if self._approvals.consume(context.approval_id, context, tool, call, arguments):
                 return PermissionDecision(
                     DecisionAction.ALLOW,
                     "APPROVED",
@@ -439,30 +593,37 @@ class ToolRuntime:
 
     def __init__(
         self,
-        tools: Sequence[ToolDefinition],
+        registry: ToolRegistry,
+        snapshot: ToolSnapshot,
         permission_engine: PermissionEngine,
         audit_sink: AuditSink,
     ) -> None:
-        self._tools = {tool.name: tool for tool in tools}
+        self._registry = registry
+        self._snapshot = snapshot
         self._permission_engine = permission_engine
         self._audit = audit_sink
+        self._approvals = permission_engine._approvals
+        self._pending: dict[str, WaitingForApproval] = {}
 
     def model_tools(self, context: ExecutionContext) -> list[dict[str, Any]]:
-        """发现期白名单：减少模型可见能力，不把 handler 暴露给模型。"""
+        """只暴露本 Run Snapshot 中的工具，不暴露全局 Registry 或 version。"""
 
         return [
             tool.to_model_tool()
-            for tool in self._tools.values()
+            for tool in self._snapshot.routes.values()
             if tool.name in context.allowed_tools
         ]
 
     async def invoke(self, call: ToolCall, context: ExecutionContext) -> ToolResult:
         started = time.perf_counter()
-        tool = self._tools.get(call.name)
+        tool = self._snapshot.routes.get(call.name)
         if tool is None:
-            return self._rejected(call, context, "TOOL_NOT_FOUND", "工具不存在")
+            return self._rejected(call, context, "TOOL_NOT_FOUND", "工具不在当前 Run Snapshot")
+        # Runtime 控制面复查：即使 Snapshot 创建后，也能阻断在飞的旧版本。
+        if not self._registry.is_live_enabled(tool):
+            return self._rejected(call, context, "TOOL_DISABLED", "工具当前已被停用")
 
-        # prepare-1：Pydantic 把不可信字典转换成 handler 可接收的业务对象。
+        # prepare-1：Pydantic 把不可信字典转换成不可变的规范化业务对象。
         try:
             arguments = tool.parameters_model.model_validate(call.arguments)
         except ValidationError as error:
@@ -473,7 +634,7 @@ class ToolRuntime:
             return self._rejected(call, context, "INVALID_ARGUMENT", details)
 
         # prepare-2：执行期重新授权，返回 allow / deny / confirm。
-        decision = await self._permission_engine.decide(tool, arguments, context)
+        decision = await self._permission_engine.decide(tool, call, arguments, context)
         self._audit.append(
             AuditRecord(
                 trace_id=context.trace_id,
@@ -488,6 +649,14 @@ class ToolRuntime:
             )
         )
         if decision.action is not DecisionAction.ALLOW:
+            if decision.action is DecisionAction.CONFIRM:
+                self._pending[call.tool_call_id] = WaitingForApproval(
+                    call=call,
+                    tool_version=tool.version,
+                    arguments=arguments,
+                    context=context,
+                    approval_prompt=decision.reason,
+                )
             return ToolResult(
                 tool_call_id=call.tool_call_id,
                 tool_name=call.name,
@@ -502,14 +671,41 @@ class ToolRuntime:
             raw = await self._execute_with_recovery(tool, call.tool_call_id, arguments, context)
         except TimeoutError:
             code = "TIMEOUT" if tool.policy.effect is Effect.READ or tool.policy.idempotent else "TIMEOUT_UNKNOWN"
-            return self._failed(call, context, started, code, "工具执行超时")
-        except PolicyDenied as error:
-            return self._failed(call, context, started, error.code, str(error))
-        except Exception as error:  # 生产中映射异常类型，不把 traceback 交给模型。
-            return self._failed(call, context, started, "TOOL_ERROR", str(error))
+            return self._failed(call, context, started, ToolError(code=code, message="工具执行超时", trace_id=context.trace_id))
+        except ToolExecutionError as error:
+            return self._failed(
+                call,
+                context,
+                started,
+                ToolError(code=error.code, message=str(error), retryable=error.retryable, trace_id=context.trace_id),
+            )
+        except Exception:
+            return self._failed(
+                call,
+                context,
+                started,
+                ToolError(code="TOOL_ERROR", message="工具执行失败", trace_id=context.trace_id),
+            )
 
-        # finalize：先投影与脱敏，再形成模型能看见的 ToolResult。
-        safe_content = _redact(dict(raw))
+        # finalize：先验证白名单输出契约，再脱敏，最后形成模型能看见的 ToolResult。
+        try:
+            output_payload = dict(raw)
+            allowed_input_keys = {
+                field_name if field.validation_alias is None else str(field.validation_alias)
+                for field_name, field in tool.output_model.model_fields.items()
+            }
+            undeclared_keys = set(output_payload) - allowed_input_keys
+            if undeclared_keys:
+                raise ValueError("handler returned undeclared fields")
+            validated_output = tool.output_model.model_validate(output_payload)
+        except (TypeError, ValueError, ValidationError):
+            return self._failed(
+                call,
+                context,
+                started,
+                ToolError(code="INVALID_TOOL_OUTPUT", message="工具返回了不符合契约的结果", trace_id=context.trace_id),
+            )
+        safe_content = _redact(validated_output.model_dump(mode="json", by_alias=True))
         latency_ms = round((time.perf_counter() - started) * 1_000)
         self._audit.append(
             AuditRecord(
@@ -526,6 +722,16 @@ class ToolRuntime:
             )
         )
         return ToolResult(call.tool_call_id, call.name, True, DecisionAction.ALLOW, "OK", safe_content)
+
+    async def confirm(self, approval_id: str, tool_call_id: str) -> ToolResult:
+        """用户确认后，记录审批并立即恢复被冻结的原始调用。"""
+
+        pending = self._pending.pop(tool_call_id, None)
+        if pending is None:
+            raise KeyError("不存在待审批的工具调用")
+        self._approvals.approve(approval_id, pending)
+        approved_context = replace(pending.context, approval_id=approval_id)
+        return await self.invoke(pending.call, approved_context)
 
     async def _execute_with_recovery(
         self,
@@ -572,8 +778,7 @@ class ToolRuntime:
         call: ToolCall,
         context: ExecutionContext,
         started: float,
-        code: str,
-        content: Any,
+        error: ToolError,
     ) -> ToolResult:
         self._audit.append(
             AuditRecord(
@@ -584,12 +789,20 @@ class ToolRuntime:
                 tenant_id=context.tenant_id,
                 phase="execution",
                 decision="failed",
-                code=code,
+                code=error.code,
                 argument_keys=tuple(sorted(call.arguments)),
                 latency_ms=round((time.perf_counter() - started) * 1_000),
             )
         )
-        return ToolResult(call.tool_call_id, call.name, False, DecisionAction.DENY, code, content)
+        return ToolResult(
+            call.tool_call_id,
+            call.name,
+            False,
+            DecisionAction.DENY,
+            error.code,
+            error,
+            retryable=error.retryable,
+        )
 
 
 ORDERS = {
@@ -624,7 +837,7 @@ async def get_order_handler(
     order = ORDERS.get((context.tenant_id, arguments.order_id))
     if not order:
         raise PolicyDenied("ORDER_NOT_FOUND", "当前租户下不存在该订单")
-    return {**order, "access_token": "tok_demo_should_not_leak"}
+    return dict(order)
 
 
 async def refund_precheck(raw_arguments: ArgsModel, context: ExecutionContext) -> None:
@@ -683,6 +896,8 @@ async def simulated_shell_handler(
 
 
 async def transfer_handler(tool_call_id: str, raw_arguments: ArgsModel, context: ExecutionContext) -> Mapping[str, Any]:
+    """教学用非幂等写操作：当前尚未引入 Repository 原子写入与 idempotency key。"""
+
     arguments = raw_arguments
     assert isinstance(arguments, TransferArgs)
     from_key = (context.tenant_id, arguments.from_account)
@@ -707,20 +922,24 @@ async def transfer_handler(tool_call_id: str, raw_arguments: ArgsModel, context:
     }
 
 
-def build_tools() -> list[ToolDefinition]:
+def build_tools(*, version: str = "v1") -> list[ToolDefinition]:
     return [
         ToolDefinition(
             name="get_order",
+            version=version,
             description="查询当前租户订单状态和可退金额",
             parameters_model=GetOrderArgs,
+            output_model=GetOrderOutput,
             policy=ToolPolicy(Effect.READ, Risk.MEDIUM, "order:read", False, 1.0, 2, True),
             handler=get_order_handler,
             canonical_target=lambda args: str(getattr(args, "order_id")),
         ),
         ToolDefinition(
             name="create_refund",
+            version=version,
             description="为当前租户的已支付订单创建退款",
             parameters_model=CreateRefundArgs,
+            output_model=CreateRefundOutput,
             policy=ToolPolicy(Effect.WRITE, Risk.HIGH, "refund:create", True, 2.0, 0, False),
             handler=create_refund_handler,
             precheck=refund_precheck,
@@ -728,16 +947,20 @@ def build_tools() -> list[ToolDefinition]:
         ),
         ToolDefinition(
             name="run_shell",
+            version=version,
             description="教学用模拟 Shell，不执行真实系统命令",
             parameters_model=RunShellArgs,
+            output_model=RunShellOutput,
             policy=ToolPolicy(Effect.SHELL, Risk.MEDIUM, "shell:run", False, 1.0, 0, False),
             handler=simulated_shell_handler,
             canonical_target=lambda args: str(getattr(args, "command")),
         ),
         ToolDefinition(
             name="transfer",
+            version=version,
             description="从指定账户操作转账金额至目标账户",
             parameters_model=TransferArgs,
+            output_model=TransferOutput,
             policy=ToolPolicy(Effect.WRITE, Risk.HIGH, "transfer:execute", True, 2.0, 0, False),
             handler=transfer_handler,
             precheck=transfer_precheck,
@@ -765,35 +988,51 @@ def base_context(**overrides: Any) -> ExecutionContext:
     return replace(context, **overrides)
 
 
+def build_registry(*, versions: Sequence[str] = ("v1",)) -> ToolRegistry:
+    registry = ToolRegistry()
+    for version in versions:
+        for tool in build_tools(version=version):
+            registry.register(tool)
+    return registry
+
+
 def build_runtime(
     *,
     approvals: ApprovalStore | None = None,
     audit: AuditSink | None = None,
     rules: Sequence[PermissionRule] = DEFAULT_RULES,
+    registry: ToolRegistry | None = None,
+    routes: Mapping[str, str] | None = None,
 ) -> tuple[ToolRuntime, ApprovalStore, AuditSink]:
     approval_store = approvals or ApprovalStore()
     audit_sink = audit or AuditSink()
+    selected_registry = registry or build_registry()
+    selected_routes = routes or {tool.name: tool.version for tool in build_tools()}
+    snapshot = selected_registry.snapshot(selected_routes)
     engine = PermissionEngine(rules, approval_store)
-    return ToolRuntime(build_tools(), engine, audit_sink), approval_store, audit_sink
+    return ToolRuntime(selected_registry, snapshot, engine, audit_sink), approval_store, audit_sink
 
 
 async def run_offline_demo() -> None:
     reset_side_effects()
-    runtime, approvals, audit = build_runtime()
+    registry = build_registry(versions=("v1", "v2"))
+    v1_routes = {tool.name: "v1" for tool in build_tools()}
+    v2_routes = {tool.name: "v2" for tool in build_tools()}
+    runtime, _, audit = build_runtime(registry=registry, routes=v1_routes)
+    future_runtime, _, _ = build_runtime(registry=registry, routes=v2_routes)
     context = base_context()
     refund_arguments = {"order_id": "ord_1001", "amount": 399.0, "reason": "商品存在质量问题"}
+    pending_refund = ToolCall("call_02", "create_refund", refund_arguments)
+
+    print("[snapshot] current get_order:", runtime._snapshot.routes["get_order"].version)
+    print("[snapshot] future get_order:", future_runtime._snapshot.routes["get_order"].version)
+    print("[model schema]", json.dumps(runtime.model_tools(context)[0], ensure_ascii=False))
 
     results = [
         await runtime.invoke(ToolCall("call_01", "get_order", {"order_id": "ord_1001"}), context),
-        await runtime.invoke(ToolCall("call_02", "create_refund", refund_arguments), context),
+        await runtime.invoke(pending_refund, context),
+        await runtime.confirm("approval_01", pending_refund.tool_call_id),
     ]
-    approvals.approve("approval_01", context, "create_refund", refund_arguments)
-    results.append(
-        await runtime.invoke(
-            ToolCall("call_03", "create_refund", refund_arguments),
-            replace(context, approval_id="approval_01"),
-        )
-    )
     results.extend(
         [
             await runtime.invoke(
@@ -816,14 +1055,23 @@ async def run_offline_demo() -> None:
     )
 
     for result in results:
-        print(json.dumps(result.__dict__ if hasattr(result, "__dict__") else {
+        print(json.dumps({
             "tool_call_id": result.tool_call_id,
             "tool_name": result.tool_name,
             "ok": result.ok,
             "action": result.action,
             "code": result.code,
-            "content": result.content,
+            "content": _json_value(result.content),
         }, ensure_ascii=False, default=str))
+    registry.set_version_enabled("get_order", "v1", False)
+    stale_result = await runtime.invoke(
+        ToolCall("call_07", "get_order", {"order_id": "ord_1001"}), context
+    )
+    v2_result = await future_runtime.invoke(
+        ToolCall("call_08", "get_order", {"order_id": "ord_1001"}), context
+    )
+    print("[live switch] v1 stale snapshot:", stale_result.code)
+    print("[live switch] v2 new snapshot:", v2_result.code)
     print(json.dumps({"side_effects": SIDE_EFFECTS, "audit_records": len(audit.records)}, ensure_ascii=False))
 
 
