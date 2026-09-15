@@ -19,17 +19,19 @@ week02/
 
 ### 运行作业二
 
-使用项目的 Conda 环境，在项目根目录执行：
+先进入本仓库目录：
 
 ```bash
+cd /path/to/ai-agent
 conda run -n ai-agent python -m pytest week02/test_tool_governance.py -v -k "transfer"
 ```
 
 预期：5 个转账验收测试全部通过。超时测试使用 `45000`：它大于慢调用阈值 `40000`、但不超过业务限额 `50000`，因此会进入 Handler 并在 `2s` Runtime 超时后返回 `TIMEOUT_UNKNOWN`；转账是非幂等写操作，不会自动重试。
 
-如需查看确认状态和脱敏结果：
+如需查看确认状态和脱敏结果，在同一仓库目录执行：
 
 ```bash
+cd /path/to/ai-agent
 conda run -n ai-agent python -m pytest week02/test_tool_governance.py -v -s -k "audit_and_confirm"
 ```
 
