@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Week03 Codebase Agent 架构与装配说明</title>
+<style>
+:root{--bg:#07111f;--panel:#0d1b2f;--card:#10243e;--line:#315170;--text:#e9f2ff;--muted:#a9bdd8;--blue:#4cb3ff;--green:#4fe0ac;--amber:#ffca63;--red:#ff7b7b;--purple:#b69cff}
+*{box-sizing:border-box} body{margin:0;background:linear-gradient(140deg,#07111f,#0b1730 45%,#081522);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",sans-serif;line-height:1.5} main{width:min(1540px,calc(100% - 40px));margin:0 auto;padding:42px 0 64px} h1{font-size:34px;margin:0 0 6px}.lead{margin:0 0 34px;color:var(--muted);font-size:17px}section{background:rgba(13,27,47,.88);border:1px solid #29415f;border-radius:18px;padding:26px;margin:24px 0;box-shadow:0 16px 44px rgba(0,0,0,.2);overflow:auto}h2{margin:0 0 8px;font-size:24px}h3{margin:0 0 7px;font-size:16px}h4{margin:0 0 5px;font-size:14px;color:#dcecff}p{margin:0;color:var(--muted);font-size:14px}code{color:#b8dcff;font-size:12px}.sub{margin:0 0 20px;color:var(--muted)}
+.layers{display:grid;grid-template-columns:repeat(3,minmax(285px,1fr));gap:16px;min-width:960px}.card{background:var(--card);border:1px solid var(--line);border-radius:13px;padding:16px;min-height:247px}.tag{display:inline-block;font-size:12px;padding:3px 8px;border-radius:999px;margin-bottom:10px;font-weight:700}.c1 .tag{background:#153c60;color:#7fc6ff}.c2 .tag,.c6 .tag{background:#153e37;color:#70e6bd}.c3 .tag{background:#503a18;color:#ffd27c}.c4 .tag{background:#34285b;color:#c2acff}.c5 .tag{background:#4c2730;color:#ff9daa}.desc{color:#d6e7fa;font-size:14px;margin:7px 0 10px}.rule{height:1px;background:#29415f;margin:10px 0}.label{font-size:11px;letter-spacing:.04em;color:var(--amber);font-weight:800}.card ul{margin:5px 0 0;padding-left:17px;color:var(--muted);font-size:13px}.card li{margin:3px 0}.note{border-left:3px solid var(--amber);padding:10px 14px;color:#dce8fa;background:rgba(255,202,99,.06);margin-top:16px;font-size:14px}
+.inject{display:grid;grid-template-columns:300px 42px minmax(770px,1fr);gap:14px;align-items:stretch;min-width:1160px}.input,.receiver,.binding{border:1px solid var(--line);border-radius:12px;padding:16px;background:var(--card)}.input{border-left:4px solid var(--blue)}.receiver{border-left:4px solid var(--green)}.binding{border-left:4px solid var(--purple)}.arrow{align-self:center;text-align:center;color:var(--blue);font-size:28px;font-weight:800}.inject-row{display:grid;grid-template-columns:190px 1fr;gap:14px;padding:13px 0;border-bottom:1px solid #29415f}.inject-row:last-child{border-bottom:0}.inject-row code{font-size:13px}.why{color:var(--muted);font-size:13px}.why b{color:#eaf4ff}.codebox{margin-top:18px;background:#071522;border:1px solid #29415f;border-radius:12px;padding:16px;white-space:pre;overflow:auto;color:#cfe6ff;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;line-height:1.6}
+.flow{display:grid;grid-template-columns:repeat(5,minmax(185px,1fr));gap:34px;min-width:1140px;align-items:center}.step{position:relative;border-radius:12px;border:1px solid var(--line);background:var(--card);min-height:192px;padding:16px}.step:after{content:"→";position:absolute;right:-29px;top:74px;color:var(--blue);font-size:28px}.step:last-child:after{display:none}.number{color:var(--blue);font-weight:800;font-size:13px}.step .small{margin-top:10px;font-size:12px;color:#c5d5ea}
+.sequence{min-width:1120px;display:grid;grid-template-columns:150px repeat(5,1fr);border-top:1px solid var(--line);border-left:1px solid var(--line)}.sequence>div{min-height:62px;padding:10px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);font-size:13px}.head{background:#162c4a;color:#dcecff;font-weight:700;text-align:center}.phase{background:#0c2138;color:var(--amber);font-weight:700}.msg{color:var(--muted)}.active{background:rgba(76,179,255,.12);color:#cbe8ff}.success{background:rgba(79,224,172,.1);color:#b7f4da}.warn{background:rgba(255,202,99,.1);color:#ffe0a0}.legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:16px;color:var(--muted);font-size:13px}.dot{width:10px;height:10px;border-radius:50%;display:inline-block;margin-right:5px}.dblue{background:var(--blue)}.dgreen{background:var(--green)}.damber{background:var(--amber)}
+@media(max-width:700px){main{width:min(100% - 24px,1540px);padding-top:24px}h1{font-size:27px}section{padding:18px}}
+</style></head>
+<body><main>
+<h1>Week03 · Pi Native Codebase Agent</h1>
+<p class="lead">从“模型提出动作”到“受控 Runtime 执行”，并通过 Pi 原生 Loop 把结果与证据持续回写的代码库理解 Agent。</p>
+
+<section><h2>① 核心组件：职责、输入与不可替代边界</h2><p class="sub">每个模块只做一件事；后面的装配层只注入它们，不复制其内部规则。</p><div class="layers">
+<article class="card c1"><span class="tag">装配层</span><h3>Agent Run</h3><code>src/agent/codebase-agent-run.ts</code><p class="desc">单次 Run 的 Composition Root：在这里创建对象、连接依赖、观察事件；不实现工具、路径安全或停止算法。</p><div class="rule"></div><div class="label">它注入 / 组装</div><ul><li>可信 <code>RunExecutionContext</code></li><li><code>ToolRuntime</code> 与 <code>AgentTool[]</code></li><li><code>RunStopCenter</code> Hooks</li><li>调用方提供的 <code>model</code>、<code>streamFn</code></li></ul></article>
+<article class="card c2"><span class="tag">模型层</span><h3>Gateway Model Runtime</h3><code>src/model/gateway-models.ts</code><p class="desc">把“逻辑模型”注册进 Pi，并提供 Gateway 的流式入口；不在本地挑供应商或重试。</p><div class="rule"></div><div class="label">输出给装配层</div><ul><li><code>model</code>：Pi Loop 要使用的逻辑模型</li><li><code>stream(context, options)</code>：流式请求入口</li><li>环境变量解析的 Gateway endpoint / auth</li></ul></article>
+<article class="card c3"><span class="tag">框架循环</span><h3>Pi runAgentLoop</h3><code>@earendil-works/pi-agent-core</code><p class="desc">唯一的模型循环。负责消息转换、模型请求、Tool Call 调度、Tool Result 回写、Follow-up 继续。</p><div class="rule"></div><div class="label">从装配层接收</div><ul><li><code>AgentContext</code>：Prompt、消息、工具</li><li><code>AgentLoopConfig</code>：模型、Hooks、转换策略</li><li>取消信号和 <code>streamFn</code></li></ul></article>
+<article class="card c4"><span class="tag">循环保护</span><h3>RunStopCenter</h3><code>src/agent/run-stop-center.ts</code><p class="desc">只根据 Hook 输入与自己的 Run 状态做停止决策；不读文件、不调用模型、不执行工具。</p><div class="rule"></div><div class="label">维护的 Run 事实</div><ul><li>动作指纹次数：第三次阻止</li><li>当前轮次与最大轮数</li><li>成功读取路径与成功产物路径</li><li>Final 不足时排队 <code>FINAL_REJECTED</code></li></ul></article>
+<article class="card c5"><span class="tag">Pi 工具适配</span><h3>AgentTool[] Adapter</h3><code>src/tools/pi-runtime-tools.ts</code><p class="desc">协议转换层：Pi 工具接口 ↔ 应用 Runtime。它不拥有任何文件操作或路径权限规则。</p><div class="rule"></div><div class="label">做且只做</div><ul><li>声明严格 TypeBox 参数 Schema</li><li>原样转发 <code>toolCallId</code>、参数、signal</li><li>受控成功结果映射为 text + details</li><li>受控失败抛出为 Pi 错误工具结果</li></ul></article>
+<article class="card c6"><span class="tag">唯一执行路径</span><h3>ToolRuntime</h3><code>src/runtime/tool-runtime.ts</code><p class="desc">所有实际工具执行的唯一入口：先治理不可信输入，再调用 handler；模型永远不直接接触底层文件系统对象。</p><div class="rule"></div><div class="label">强制执行的规则</div><ul><li>TypeBox 二次参数校验、取消归一化</li><li>仓库 / artifacts 根目录路径约束</li><li>列表、搜索、读取、产物写入四种能力</li><li>返回已治理 <code>ControlledToolResult</code></li></ul></article>
+</div><div class="note"><b>关键分界：</b>装配层负责“谁和谁连接”；Runtime 负责“是否可以执行”；Stop Center 负责“本 Run 是否该继续”。三者互不替代。</div></section>
+
+<section><h2>② 注入关系：为什么要把这些组件作为依赖传入？</h2><p class="sub">注入不是为了“形式上的 DI”，而是为了让每一层可替换、可测试，并维持唯一执行路径。</p><div class="inject">
+<div class="input"><h3>调用方提供</h3><p><code>model</code>、<code>streamFn</code>、<code>maxTurns</code>、<code>signal</code>、可选 Runtime / 执行上下文 / 文本回调。</p><div class="rule"></div><p>生产环境使用 Gateway 流；测试环境注入脚本化流，不走真实网络。</p></div><div class="arrow">→</div>
+<div class="receiver"><h3>runCodebaseAgent()</h3><p>唯一装配点：创建默认依赖，或使用注入的替代实现，然后调用一次 <code>runAgentLoop</code>。</p><div class="rule"></div>
+<div class="inject-row"><code>model + streamFn</code><div class="why"><b>作用：</b>决定“如何得到下一条 AssistantMessage”。抽象后，业务层不依赖具体 Gateway；脚本测试也能驱动真实 Pi Loop。</div></div>
+<div class="inject-row"><code>executionContext</code><div class="why"><b>作用：</b>将“要分析哪里、产物写到哪里”作为可信服务端配置固定下来。模型只提交相对路径，不能改根目录。</div></div>
+<div class="inject-row"><code>runtime</code><div class="why"><b>作用：</b>默认创建真实 Runtime；测试可注入同接口的替代 Runtime 来断言调用参数。但无论哪种，Adapter 都只走一个 <code>execute()</code> 入口。</div></div>
+<div class="inject-row"><code>maxTurns</code><div class="why"><b>作用：</b>教学默认值保持安全上限；调用方可按任务预算覆盖，而停止逻辑仍集中在 Stop Center。</div></div>
+<div class="inject-row"><code>signal</code><div class="why"><b>作用：</b>从外部取消传播到 Pi 流、Hook、Adapter 和 Runtime，避免引入第二套取消控制器。</div></div>
+<div class="inject-row"><code>onTextDelta</code><div class="why"><b>作用：</b>把可见文本交给 CLI / UI；只转发 <code>text_delta</code>，不记录或展示模型隐藏 reasoning。</div></div>
+</div></div>
+<div class="codebox">调用方
+  │ 注入：model / streamFn / signal / 可选 runtime、context
+  ▼
+runCodebaseAgent(options)
+  ├─ 创建 RunStopCenter（Run 内状态与完成契约）
+  ├─ createPiRuntimeTools(runtime, executionContext)
+  ├─ 构造 AgentContext（中文 Prompt + 工具列表）
+  ├─ createRunStopHooks(stopCenter)
+  └─ runAgentLoop(userTask, context, config, eventSink, signal, streamFn)
+       └─ Pi 负责循环；装配层不写 while/for 循环</div>
+</section>
+
+<section><h2>③ 核心运行流程</h2><div class="flow">
+<article class="step"><div class="number">01 · 创建 Run</div><h3>可信边界与依赖</h3><p>创建或接收执行上下文、Runtime、Stop Center；由 Adapter 生成四个 Pi 工具。</p><p class="small">输出：可执行的 AgentContext 与 Config。</p></article>
+<article class="step"><div class="number">02 · 模型请求</div><h3>Pi 原生 Loop</h3><p>只把 user / assistant / toolResult 转给模型。Gateway 返回 Assistant 文本或 Tool Call。</p><p class="small">文本增量只进入 onTextDelta。</p></article>
+<article class="step"><div class="number">03 · 工具执行</div><h3>Hook → Adapter → Runtime</h3><p>Schema 校验后先检查重复动作；允许才转发到 Runtime；Runtime 治理后执行 handler。</p><p class="small">任何文件读写都只能发生在 Runtime。</p></article>
+<article class="step"><div class="number">04 · 证据与停止</div><h3>受控结果驱动状态</h3><p>成功读取才记录源码路径，成功写入才记录产物路径；错误结果不产生证据。</p><p class="small">在 turn_end 后完成校验，能读取本轮最新证据。</p></article>
+<article class="step"><div class="number">05 · 结束或续跑</div><h3>Final / Follow-up</h3><p>证据齐全则成功结束；证据不足时注入 <code>FINAL_REJECTED</code>，同一 Run 继续。</p><p class="small">同一 Run：轮次、动作计数、证据均不重置。</p></article>
+</div></section>
+
+<section><h2>④ 一次 Tool Call 的时序图</h2><div class="sequence">
+<div class="head">阶段</div><div class="head">Pi Loop</div><div class="head">Stop Center</div><div class="head">Pi Tool Adapter</div><div class="head">Tool Runtime</div><div class="head">Gateway / 模型</div>
+<div class="phase">1. 请求</div><div class="active">发起流式模型请求</div><div></div><div></div><div></div><div class="active">Assistant ToolCall<br>包含 <code>toolCallId</code></div>
+<div class="phase">2. 预执行</div><div class="msg">Schema 校验后触发 Hook</div><div class="warn">beforeToolCall<br>规范化参数、动作计数<br>第三次直接 block</div><div></div><div></div><div></div>
+<div class="phase">3. 执行</div><div class="msg">调用 AgentTool.execute</div><div></div><div class="active">原样转发 ID、参数、signal</div><div class="active">execute()<br>参数 / 路径 / 取消治理<br>再调用 handler</div><div></div>
+<div class="phase">4. 回写</div><div class="msg">生成 ToolResultMessage</div><div class="success">afterToolCall<br>只从成功结果收集证据</div><div class="success">受控结果 → text + details</div><div class="success">ControlledToolResult<br>保留同一 toolCallId</div><div class="success">下一轮 Context 看到<br>toolResult</div>
+<div class="phase">5. 回合结束</div><div class="msg">turn_end → shouldStopAfterTurn</div><div class="warn">已有停止原因 → 最大轮数 → 自然 Final 完成校验</div><div></div><div></div><div class="msg">继续工具调用，或 Final</div>
+</div><div class="legend"><span><i class="dot dblue"></i>正常调用链</span><span><i class="dot dgreen"></i>已治理的成功结果</span><span><i class="dot damber"></i>循环保护与停止决策</span></div>
+<div class="note"><b>完整 ID 链路：</b><code>Assistant ToolCall.id → AgentTool.execute(toolCallId) → ToolRuntime.execute({ toolCallId }) → ControlledToolResult.toolCallId → ToolResultMessage.toolCallId → Trace</code></div>
+</section>
+</main></body></html>

@@ -1,0 +1,8 @@
+# Dependencies
+node_modules/
+
+# Generated TypeScript output
+dist/
+
+# Agent-generated deliverables; keep source fixtures and the architecture diagram versioned.
+artifacts/
