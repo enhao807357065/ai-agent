@@ -143,22 +143,53 @@ export async function runCodebaseAgent(
 
   // 复用 Stop Center 的 Hook；装配层只接线，不在这里复制重复动作、证据或 Final 规则。
   const stopHooks = createRunStopHooks(stopCenter);
+  // 回答的问题: Pi 应该怎样运行这个工作台？ 用哪个模型、工具串行还是并行、消息如何转换、生命周期 Hook 如何处理
   const config: AgentLoopConfig = {
     model: options.model,
     // 自定义/UI 消息不能交给模型；仅保留 Pi 可转换的三种协议消息。
     convertToLlm: (messages) => messages.filter(isModelMessage) as Message[],
     // Runtime 共享本地文件系统边界，强制按 Tool Call 串行执行。
-    toolExecution: "sequential",
+    toolExecution: "sequential",  // 串行，不设置默认parallel
     // Gateway 负责供应商重试；本地 Loop 不叠加 Provider retry。
     maxRetries: 0,
     ...stopHooks,
     // 仅预留下一轮准备扩展点；当前不保存 Checkpoint，也不篡改 Stop Center 证据。
+    // 触发时机：上一轮完整结束
+    // → shouldStopAfterTurn 返回 false
+    // → 下一轮真正开始之前
     prepareNextTurn: async () => undefined,
     // 当前没有外部中途指令；自然停止时的 Follow-up 由 stopHooks.getFollowUpMessages 提供。
     getSteeringMessages: async () => [],
   };
 
   // 唯一模型循环：不在装配层另写 while / for / 递归循环。
+  // runAgentLoop(...)
+  //   │
+  //   ├─ 将初始 user message 加入上下文
+  //   │
+  //   └─ Pi 内部 runLoop(...)
+  //        │
+  //        ├─ 调用 streamFn(model, llmContext, { signal, ... })
+  //        │
+  //        ├─ 接收流式 AssistantMessage
+  //        │
+  //        ├─ 若 Assistant 有 Tool Call
+  //        │    │
+  //        │    ├─ 触发 beforeToolCall
+  //        │    ├─ 调用 AgentTool.execute(...)
+  //        │    ├─ 触发 afterToolCall
+  //        │    └─ 把 ToolResult 加回 Context
+  //        │
+  //        ├─ 触发 turn_end
+  //        ├─ 触发 shouldStopAfterTurn
+  //        │
+  //        ├─ 若继续：
+  //        │    ├─ prepareNextTurn
+  //        │    ├─ getSteeringMessages
+  //        │    └─ 发起下一轮模型请求
+  //        │
+  //        └─ 若模型自然 Final：
+  //             └─ getFollowUpMessages
   const messages = await runAgentLoop(
     [createUserTaskMessage()],
     context,
@@ -181,6 +212,12 @@ export async function runCodebaseAgent(
   );
 
   // 返回不可变快照：Stop Center 原因优先；仅当它未决定时才暴露模型取消/错误原因。
+  // stopState 是 Run 结束后，从 RunStopCenter 取出的不可变事实快照：
+  // Loop 已经结束
+  //    ↓
+  // 把 RunStopCenter 内存中积累的状态导出
+  //    ↓
+  // 供 CLI、API、测试、审计、UI 查看
   const stopState = stopCenter.getState();
   return Object.freeze({
     state: Object.freeze({

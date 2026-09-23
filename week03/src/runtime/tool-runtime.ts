@@ -4,6 +4,31 @@ import { Type, type Static, type TSchema } from "typebox";
 import { Check } from "typebox/value";
 import type { RunExecutionContext } from "./execution-context.js";
 
+// 模型 Tool Call
+//   ↓
+// Pi AgentTool.execute(...)
+//   ↓
+// createPiRuntimeTools(...)
+//   ↓
+// ToolRuntime.execute({
+//   toolCallId,
+//   toolName: "search_code",
+//   modelArguments,
+//   context,
+//   signal
+// })
+//   ↓
+// 1. 从 #tools 查工具注册表
+// 2. TypeBox Schema 校验参数
+// 3. constrainParameters 路径约束
+// 4. 调用 searchCode handler
+// 5. Node readdir/readFile 实际读文件
+// 6. 组装 ControlledToolResult
+//   ↓
+// Pi ToolResultMessage
+//   ↓
+// 下一轮模型 Context
+
 export const ToolName = {
   LIST_FILES: "list_files",
   SEARCH_CODE: "search_code",

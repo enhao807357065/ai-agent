@@ -216,15 +216,27 @@ export class RunStopCenter {
  */
 export function createRunStopHooks(center: RunStopCenter) {
   return {
+    // beforeToolCall
+    // • 时机: Pi 完成工具参数 Schema 校验后、真正执行工具前
+    // • 作用: 计算动作指纹；第三次相同行为直接阻止，不进入 Runtime handler
     beforeToolCall: async (context: BeforeToolCallContext): Promise<BeforeToolCallResult | undefined> =>
       center.beforeToolCall(context),
+    // afterToolCall
+    // • 时机: 工具执行结束后
+    // • 作用: 只从成功且已治理的结果收集“读了哪些源码”“写了哪些产物”证据
     afterToolCall: async (context: AfterToolCallContext) => {
       center.afterToolCall(context);
       // 不覆盖 Pi 原始工具结果；只让 Center 记录成功证据。
       return undefined;
     },
+    // shouldStopAfterTurn
+    // • 时机: 一轮模型响应与工具执行结束后
+    // • 作用: 按优先级判断：已有停止原因 → 最大轮数 → 自然 Final 的完成契约 → 继续
     shouldStopAfterTurn: async (context: ShouldStopAfterTurnContext): Promise<boolean> =>
       center.shouldStopAfterTurn(context),
+    // getFollowUpMessages
+    // • 时机: 模型自然结束、但 Loop 准备结束时
+    // • 作用: 若 Final 证据不足，取出 [FINAL_REJECTED] 用户 Follow-up，让 Pi 在同一个 Run继续
     getFollowUpMessages: async (): Promise<AgentMessage[]> => center.takeFollowUpMessages(),
   };
 }
