@@ -1,0 +1,261 @@
+import type {
+  AfterToolCallContext,
+  BeforeToolCallContext,
+  BeforeToolCallResult,
+  ShouldStopAfterTurnContext,
+} from "@earendil-works/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import { EvidenceKind, PlanStore, StepKind, StepStatus, type PlanStep } from "../planning/plan-store.js";
+import { ToolName, ToolResultCode } from "../runtime/tool-runtime.js";
+import type { RuntimeToolDetails } from "../tools/pi-runtime-tools.js";
+
+/** 真实 Run 结束原因；completed 只能由完成契约满足产生。 */
+export const StopReason = {
+  REPEATED_ACTION: "repeated_action",
+  MAX_TURNS_REACHED: "max_turns_reached",
+  COMPLETION_CONTRACT_SATISFIED: "completion_contract_satisfied",
+} as const;
+export type StopReason = (typeof StopReason)[keyof typeof StopReason];
+export const StopDecisionCode = { REPEATED_ACTION: "repeated_action", FINAL_REJECTED: "FINAL_REJECTED" } as const;
+
+/** 原代码理解任务的完成契约。 */
+export interface CodeUnderstandingCompletionContract {
+  readonly kind: "code_understanding";
+  readonly minimumReadFiles: number;
+  readonly requiredArtifactPath: string;
+}
+/** 修复交付的完成契约：证据由 afterToolCall 从真实受控工具结果记录，而非模型自述。 */
+export interface FixCompletionContract {
+  readonly kind: "fix";
+  /** 修复 Run 由 Plan 全步骤验收闭环；无需再让模型填布尔“自证”。 */
+  readonly requiredPlanId: string;
+}
+/** 兼容原 lesson 的输入形状；未显式 kind 时按 code_understanding 解释。 */
+export type CompletionContract = CodeUnderstandingCompletionContract | FixCompletionContract;
+export type CompletionRequirements = Omit<CodeUnderstandingCompletionContract, "kind">;
+
+export interface RunStopCenterOptions {
+  readonly runId: string;
+  readonly maxTurns: number;
+  readonly completion: CompletionContract | CompletionRequirements;
+  /** 可选教学观测输出：仅输出状态、工具名、ID 和计划摘要，不输出模型全文或工具结果正文。 */
+  readonly onLog?: (message: string) => void;
+  /** 可选后才启用 Planner 对写工具的 step 绑定，保持原代码理解任务可运行。 */
+  readonly planStore?: PlanStore;
+  readonly planId?: string;
+}
+export interface RunStopState {
+  readonly runId: string; readonly currentTurn: number; readonly maxTurns: number;
+  readonly stopReason?: StopReason; readonly actionCounts: Readonly<Record<string, number>>;
+  readonly readSourceFiles: readonly string[]; readonly writtenArtifacts: readonly string[];
+  readonly pendingFollowUps: readonly AgentMessage[];
+}
+
+/**
+ * Run 级治理中心：不执行工具、不调用模型。
+ * Hook 时序：beforeToolCall 守卫重复/planStepId → Adapter/Runtime 执行 → afterToolCall 记录受控证据
+ * → shouldStopAfterTurn 只根据 CompletionContract 决定是否结束。
+ */
+export class RunStopCenter {
+  readonly #actionCounts = new Map<string, number>();
+  readonly #readSourceFiles = new Set<string>();
+  readonly #writtenArtifacts = new Set<string>();
+  readonly #pendingFollowUps: AgentMessage[] = [];
+  readonly #completion: CompletionContract;
+  #currentTurn = 0; #stopReason: StopReason | undefined;
+
+  constructor(private readonly options: RunStopCenterOptions) {
+    if (!Number.isInteger(options.maxTurns) || options.maxTurns < 1) throw new Error("maxTurns must be a positive integer.");
+    this.#completion = normalizeContract(options.completion);
+    if ((options.planStore === undefined) !== (options.planId === undefined)) throw new Error("planStore and planId must be provided together.");
+  }
+
+  beforeToolCall(context: BeforeToolCallContext): BeforeToolCallResult | undefined {
+    if (this.#stopReason) {
+      this.#log(`tool.blocked name=${context.toolCall.name} callId=${context.toolCall.id} reason=${this.#stopReason}`);
+      return blockedResult(this.#stopReason);
+    }
+    const actionKey = actionFingerprint(context.toolCall.name, context.args);
+    const count = (this.#actionCounts.get(actionKey) ?? 0) + 1;
+    this.#actionCounts.set(actionKey, count);
+    this.#log(`tool.requested name=${context.toolCall.name} callId=${context.toolCall.id} repeat=${count}`);
+    if (count >= 3) {
+      this.#setStopReason(StopReason.REPEATED_ACTION);
+      this.#log(`loop.stop reason=${StopReason.REPEATED_ACTION} detail=third_identical_tool_action`);
+      return { block: true, terminate: true, reason: `[${StopDecisionCode.REPEATED_ACTION}] The same tool action cannot be executed more than twice in this run.` };
+    }
+
+    // planStepId 是模型可见的治理 metadata。只有写入类工具必须携带，并且必须指向 running 步骤。
+    if (requiresPlanStepId(context.toolCall.name) && this.options.planStore) {
+      const stepId = asNonEmptyString(context.args, "planStepId");
+      if (!stepId) {
+        this.#log(`tool.blocked name=${context.toolCall.name} callId=${context.toolCall.id} reason=PLAN_STEP_REQUIRED`);
+        return { block: true, reason: "[PLAN_STEP_REQUIRED] This write tool requires planStepId." };
+      }
+      try {
+        const step = this.options.planStore.get(this.options.planId!).steps.find((item) => item.id === stepId);
+        if (!step || step.status !== StepStatus.RUNNING) {
+          this.#log(`tool.blocked name=${context.toolCall.name} callId=${context.toolCall.id} reason=PLAN_STEP_NOT_RUNNING stepId=${stepId}`);
+          return { block: true, reason: "[PLAN_STEP_NOT_RUNNING] planStepId must refer to a running plan step." };
+        }
+        const requiredKind = requiredStepKind(context.toolCall.name);
+        if (requiredKind && step.kind !== requiredKind) {
+          this.#log(`tool.blocked name=${context.toolCall.name} callId=${context.toolCall.id} reason=PLAN_STEP_KIND_MISMATCH stepId=${stepId} stepKind=${step.kind} requiredKind=${requiredKind}`);
+          return {
+            block: true,
+            reason: `[PLAN_STEP_KIND_MISMATCH] ${context.toolCall.name} requires a running ${requiredKind} step; ${stepId} is ${step.kind}.`,
+          };
+        }
+        this.#log(`plan.step.bound stepId=${stepId} kind=${step.kind} status=${step.status} tool=${context.toolCall.name}`);
+      } catch {
+        this.#log(`tool.blocked name=${context.toolCall.name} callId=${context.toolCall.id} reason=PLAN_NOT_FOUND`);
+        return { block: true, reason: "[PLAN_NOT_FOUND] Plan state is unavailable." };
+      }
+    }
+    return undefined;
+  }
+
+  afterToolCall(context: AfterToolCallContext): void {
+    if (context.isError) {
+      this.#log(`tool.failed name=${context.toolCall.name} callId=${context.toolCall.id} reason=pi_error`);
+      return;
+    }
+    const details = asRuntimeToolDetails(context.result.details);
+    if (details?.code !== ToolResultCode.OK) {
+      this.#log(`tool.failed name=${context.toolCall.name} callId=${context.toolCall.id} code=${details?.code ?? "missing_details"}`);
+      return;
+    }
+    if (
+      this.options.planStore
+      && (context.toolCall.name === ToolName.READ_FILE || context.toolCall.name === ToolName.SEARCH_CODE)
+    ) {
+      this.options.planStore.recordObservationToolCall(context.toolCall.id);
+      this.#log(`plan.observation.recorded tool=${context.toolCall.name} callId=${context.toolCall.id}`);
+    }
+    if (context.toolCall.name === ToolName.READ_FILE) {
+      const path = asNonEmptyString(context.args, "path");
+      if (path) {
+        this.#readSourceFiles.add(path);
+        this.#log(`completion.read_evidence count=${this.#readSourceFiles.size} path=${path}`);
+      }
+    }
+    if (context.toolCall.name === ToolName.WRITE_ARTIFACT && details.artifactPath) {
+      this.#writtenArtifacts.add(details.artifactPath);
+      this.#log(`completion.artifact_evidence path=${details.artifactPath}`);
+    }
+
+    const stepId = asNonEmptyString(context.args, "planStepId");
+    if (details?.evidenceDraft && stepId && this.options.planStore) {
+      const step = this.options.planStore.get(this.options.planId!).steps.find((item) => item.id === stepId);
+      if (!step || !isEvidenceCompatibleWithStep(details.evidenceDraft.kind, step)) {
+        this.#log(`plan.evidence.rejected tool=${context.toolCall.name} callId=${context.toolCall.id} stepId=${stepId} evidenceKind=${details.evidenceDraft.kind} reason=STEP_EVIDENCE_KIND_MISMATCH`);
+        return;
+      }
+      const evidence = this.options.planStore.recordToolEvidence(this.options.planId!, stepId, {
+        ...details.evidenceDraft, toolCallId: context.toolCall.id,
+      });
+      this.#log(`plan.evidence.recorded id=${evidence.id} stepId=${evidence.stepId} kind=${evidence.kind} codeVersion=${evidence.codeVersion}`);
+    }
+  }
+
+  shouldStopAfterTurn(context: ShouldStopAfterTurnContext): boolean {
+    if (this.#stopReason) {
+      this.#log(`loop.stop reason=${this.#stopReason} detail=already_decided`);
+      return true;
+    }
+    this.#currentTurn += 1;
+    this.#log(`turn.evaluated number=${this.#currentTurn}/${this.options.maxTurns} toolResults=${context.toolResults.length}`);
+    if (this.#currentTurn >= this.options.maxTurns) {
+      this.#setStopReason(StopReason.MAX_TURNS_REACHED);
+      this.#log(`loop.stop reason=${StopReason.MAX_TURNS_REACHED} detail=turn_budget_exhausted`);
+      return true;
+    }
+    // 模型不调用工具只是自然 Final 候选；证据不足时继续经 Pi Follow-up 同一 Run 运行。
+    if (context.toolResults.length === 0) {
+      const missing = this.getMissingCompletionEvidence();
+      if (missing.length === 0) {
+        this.#setStopReason(StopReason.COMPLETION_CONTRACT_SATISFIED);
+        this.#log(`loop.stop reason=${StopReason.COMPLETION_CONTRACT_SATISFIED} detail=natural_final_and_contract_satisfied`);
+        return true;
+      }
+      this.#pendingFollowUps.push(createFinalRejectedFollowUp(missing));
+      this.#log(`loop.continue reason=FINAL_REJECTED missing=${missing.length}`);
+    } else {
+      this.#log("loop.continue reason=tool_results_present");
+    }
+    return false;
+  }
+  takeFollowUpMessages(): AgentMessage[] { return this.#pendingFollowUps.splice(0); }
+  getMissingCompletionEvidence(): string[] {
+    const missing: string[] = [];
+    if (this.#completion.kind === "code_understanding") {
+      const remaining = this.#completion.minimumReadFiles - this.#readSourceFiles.size;
+      if (remaining > 0) missing.push(`Read ${remaining} more related source file(s); ${this.#readSourceFiles.size}/${this.#completion.minimumReadFiles} successful reads are recorded.`);
+    } else {
+      const store = this.options.planStore;
+      if (!store || this.options.planId !== this.#completion.requiredPlanId) {
+        missing.push("The required server-owned repair plan is not bound to this run.");
+      } else {
+        const plan = store.get(this.#completion.requiredPlanId);
+        const replacedStepIds = new Set(plan.revisions.flatMap((revision) => revision.replacedStepIds));
+        const unfinished = plan.steps.filter((step) => (
+          step.status !== StepStatus.COMPLETED
+          && !(step.status === StepStatus.SKIPPED && replacedStepIds.has(step.id))
+        ));
+        if (unfinished.length > 0) missing.push(`Complete all repair plan steps; unfinished: ${unfinished.map((step) => `${step.id}=${step.status}`).join(", ")}.`);
+      }
+    }
+    if (this.#completion.kind === "code_understanding" && !this.#writtenArtifacts.has(this.#completion.requiredArtifactPath)) {
+      missing.push(`Write the required login-flow artifact: ${this.#completion.requiredArtifactPath}.`);
+    }
+    return missing;
+  }
+  getState(): RunStopState { return Object.freeze({ runId: this.options.runId, currentTurn: this.#currentTurn, maxTurns: this.options.maxTurns, ...(this.#stopReason ? { stopReason: this.#stopReason } : {}), actionCounts: Object.freeze(Object.fromEntries(this.#actionCounts)), readSourceFiles: Object.freeze([...this.#readSourceFiles].sort()), writtenArtifacts: Object.freeze([...this.#writtenArtifacts].sort()), pendingFollowUps: Object.freeze([...this.#pendingFollowUps]) }); }
+  #setStopReason(reason: StopReason): void { this.#stopReason ??= reason; }
+  #log(message: string): void { this.options.onLog?.(`[run:${this.options.runId}] ${message}`); }
+}
+
+export function createRunStopHooks(center: RunStopCenter) {
+  return {
+    beforeToolCall: async (context: BeforeToolCallContext): Promise<BeforeToolCallResult | undefined> => center.beforeToolCall(context),
+    afterToolCall: async (context: AfterToolCallContext) => { center.afterToolCall(context); return undefined; },
+    shouldStopAfterTurn: async (context: ShouldStopAfterTurnContext): Promise<boolean> => center.shouldStopAfterTurn(context),
+    getFollowUpMessages: async (): Promise<AgentMessage[]> => center.takeFollowUpMessages(),
+  };
+}
+function normalizeContract(contract: CompletionContract | CompletionRequirements): CompletionContract { return "kind" in contract ? contract : { kind: "code_understanding", ...contract }; }
+function requiresPlanStepId(name: string): boolean {
+  return name === ToolName.WRITE_ARTIFACT || name === ToolName.MODIFY_CODE || name === ToolName.APPLY_PATCH || name === ToolName.RUN_TESTS;
+}
+
+/**
+ * Step 的 kind 是服务端计划语义，而不仅是提示词标签：副作用工具必须运行在
+ * 能消费其 Evidence 的步骤类型中。否则“诊断阶段跑测试”会留下 test Evidence，
+ * “诊断阶段写文档”会伪装为 change Evidence，污染审计链。
+ */
+function requiredStepKind(toolName: string): StepKind | undefined {
+  if (toolName === ToolName.MODIFY_CODE || toolName === ToolName.APPLY_PATCH) return StepKind.IMPLEMENTATION;
+  if (toolName === ToolName.RUN_TESTS) return StepKind.VERIFICATION;
+  return undefined;
+}
+
+function isEvidenceCompatibleWithStep(kind: EvidenceKind, step: PlanStep): boolean {
+  if (kind === EvidenceKind.CHANGE) return step.kind === StepKind.IMPLEMENTATION;
+  if (kind === EvidenceKind.TEST) return step.kind === StepKind.VERIFICATION;
+  return step.kind === StepKind.INVESTIGATION || step.kind === StepKind.DESIGN;
+}
+export function actionFingerprint(toolName: string, parameters: unknown): string { return `${toolName}:${JSON.stringify(canonicalize(parameters))}`; }
+function canonicalize(value: unknown): unknown { if (Array.isArray(value)) return value.map(canonicalize); if (value && typeof value === "object") return Object.fromEntries(Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b, "en")).map(([key, nested]) => [key, canonicalize(nested)])); return value; }
+function asRuntimeToolDetails(value: unknown): RuntimeToolDetails | undefined { return value && typeof value === "object" && typeof (value as Partial<RuntimeToolDetails>).code === "string" ? value as RuntimeToolDetails : undefined; }
+function asNonEmptyString(value: unknown, key: string): string | undefined { const candidate = value && typeof value === "object" ? (value as Record<string, unknown>)[key] : undefined; return typeof candidate === "string" && candidate.length > 0 ? candidate : undefined; }
+function blockedResult(reason: StopReason): BeforeToolCallResult { return { block: true, terminate: true, reason: `[${reason}] This run has already stopped.` }; }
+function createFinalRejectedFollowUp(missing: readonly string[]): AgentMessage {
+  const repairContinuation = missing.some((item) => item.startsWith("Complete all repair plan steps"))
+    ? " For a repair plan: call get_plan if needed; server-ready pending steps must be started with update_plan_step(action=start). Then perform the required governed tool action, record its real evidence, and request action=complete with those evidence IDs. Do not stop after revising a plan."
+    : "";
+  return {
+    role: "user",
+    content: `[${StopDecisionCode.FINAL_REJECTED}] Delivery evidence is incomplete:\n${missing.map((item) => `- ${item}`).join("\n")}\nContinue using tools to collect the missing evidence and complete the required artifact.${repairContinuation}`,
+    timestamp: Date.now(),
+  };
+}

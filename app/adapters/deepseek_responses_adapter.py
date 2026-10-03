@@ -104,7 +104,10 @@ class DeepSeekResponsesModel(StreamingModel):
                             arguments = json.dumps(arguments)
                         input_items.append({
                             "type": "function_call",
+                            # Chat Completions 只有一个 tool call ID；无状态重放到 Responses
+                            # 时，它既作为 item 标识，也必须作为后续 tool output 可关联的 call_id。
                             "id": tc["id"],
+                            "call_id": tc["id"],
                             "name": func["name"],
                             "arguments": arguments,
                         })

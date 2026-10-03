@@ -98,8 +98,27 @@ class DeepSeekAnthropicModel(StreamingModel):
         system_prompt = None
         anthropic_messages: list[dict[str, Any]] = []
 
+        # Chat Completions 会把并行工具结果表示为多条连续 role=tool 消息；
+        # Anthropic 要求它们作为同一条紧随 tool_use 的 user message 发送。
+        pending_tool_results: list[dict[str, Any]] = []
+
+        def flush_tool_results() -> None:
+            if pending_tool_results:
+                anthropic_messages.append({"role": "user", "content": pending_tool_results.copy()})
+                pending_tool_results.clear()
+
         for msg in messages:
             role = msg["role"]
+
+            if role == "tool":
+                pending_tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": msg["tool_call_id"],
+                    "content": msg["content"],
+                })
+                continue
+
+            flush_tool_results()
 
             if role == "system":
                 # 合并多个 system 消息
@@ -143,16 +162,7 @@ class DeepSeekAnthropicModel(StreamingModel):
                 elif content:
                     anthropic_messages.append({"role": "assistant", "content": content})
 
-            elif role == "tool":
-                # OpenAI tool result → Anthropic tool_result
-                anthropic_messages.append({
-                    "role": "user",
-                    "content": [{
-                        "type": "tool_result",
-                        "tool_use_id": msg["tool_call_id"],
-                        "content": msg["content"],
-                    }],
-                })
+        flush_tool_results()
 
         # 结构化输出：通过 assistant prefill 强制 JSON 输出
         if response_format and response_format.get("type") in ("json_object", "json_schema"):

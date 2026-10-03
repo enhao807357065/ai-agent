@@ -40,9 +40,122 @@ from app.services.gateway_structured_output_validator import (
     GatewayStructuredOutputInvalid,
     GatewayStructuredOutputSchemaError,
 )
-from app.services.gateway_model_router import GatewayModelRouter, GatewayUpstreamUnavailable
+from app.services.gateway_model_router import (
+    GatewayModelRouter,
+    GatewayUpstreamUnavailable,
+    upstream_rejection_diagnostics,
+)
 from app.services.rate_limiter import RateLimitExceeded
 from app.services.target_health_registry import TargetHealthRegistry
+
+
+def test_upstream_rejection_diagnostics_retains_protocol_fields_but_redacts_sensitive_message():
+    class RejectedRequest(Exception):
+        status_code = 422
+        body = {
+            "error": {
+                "type": "invalid_request_error",
+                "code": "invalid_value",
+                "param": "input[2].call_id",
+                "message": "Unknown call_id call_123",
+            }
+        }
+
+    assert upstream_rejection_diagnostics(RejectedRequest()) == {
+        "upstream_status_code": "422",
+        "upstream_error_type": "invalid_request_error",
+        "upstream_error_code": "invalid_value",
+        "upstream_error_param": "input[2].call_id",
+        "upstream_error_message": "Unknown call_id call_123",
+    }
+
+    class SensitiveRejectedRequest(Exception):
+        status_code = 422
+        body = {"error": {"message": "Authorization: Bearer sk-secret-value"}}
+
+    diagnostics = upstream_rejection_diagnostics(SensitiveRejectedRequest())
+    assert diagnostics == {"upstream_status_code": "422"}
+
+
+def test_router_logs_sanitized_upstream_422_before_propagating(monkeypatch):
+    import app.services.gateway_model_router as router_module
+
+    targets = {
+        "deepseek_responses/schema": TargetProfile(
+            id="deepseek_responses/schema", provider="deepseek_responses", model="schema",
+            capabilities={ModelCapability.CHAT}, priority=10,
+        ),
+    }
+
+    class RejectedRequest(Exception):
+        status_code = 422
+        body = {"error": {"type": "invalid_request_error", "param": "input[2].call_id", "message": "Unknown call_id"}}
+
+    class RejectedModel(FakeModel):
+        async def complete(self, *args, **kwargs):
+            raise RejectedRequest()
+
+    monkeypatch.setattr(router_module, "create_model_for_target", lambda _target: RejectedModel())
+    router = GatewayModelRouter(selector_for(targets, RoutingPolicy(target_ids=["deepseek_responses/schema"])))
+
+    observed = CapturingLogger()
+    monkeypatch.setattr(router_module, "logger", observed)
+    try:
+        asyncio.run(router.complete("chat-default", GatewayModelCall(messages=[{"role": "user", "content": "secret prompt"}])))
+    except RejectedRequest:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("expected upstream 422")
+
+    event = next(item for item in observed.events if item["event"] == "gateway.upstream_request_rejected")
+    assert event["target_id"] == "deepseek_responses/schema"
+    assert event["upstream_status_code"] == "422"
+    assert event["upstream_error_param"] == "input[2].call_id"
+    assert event["upstream_error_message"] == "Unknown call_id"
+    assert "secret prompt" not in str(event)
+
+
+def test_router_logs_sanitized_upstream_422_before_propagating_from_stream(monkeypatch):
+    import app.services.gateway_model_router as router_module
+
+    targets = {
+        "deepseek_responses/schema": TargetProfile(
+            id="deepseek_responses/schema", provider="deepseek_responses", model="schema",
+            capabilities={ModelCapability.CHAT, ModelCapability.STREAMING}, priority=10,
+        ),
+    }
+
+    class RejectedRequest(Exception):
+        status_code = 422
+        body = {"error": {"type": "invalid_request_error", "param": "input[2].call_id", "message": "Unknown call_id"}}
+
+    class RejectedStreamModel(FakeModel):
+        def stream(self, *args, **kwargs):
+            async def generate():
+                raise RejectedRequest()
+                yield  # pragma: no cover
+            return generate()
+
+    monkeypatch.setattr(router_module, "create_model_for_target", lambda _target: RejectedStreamModel())
+    router = GatewayModelRouter(selector_for(targets, RoutingPolicy(target_ids=["deepseek_responses/schema"])))
+
+    async def collect():
+        return [event async for event in router.stream("chat-default", GatewayModelCall(messages=[{"role": "user", "content": "secret prompt"}]))]
+
+    observed = CapturingLogger()
+    monkeypatch.setattr(router_module, "logger", observed)
+    try:
+        asyncio.run(collect())
+    except RejectedRequest:
+        pass
+    else:  # pragma: no cover
+        raise AssertionError("expected upstream 422")
+
+    event = next(item for item in observed.events if item["event"] == "gateway.upstream_request_rejected")
+    assert event["stream"] is True
+    assert event["emitted_output"] is False
+    assert event["upstream_error_param"] == "input[2].call_id"
+    assert "secret prompt" not in str(event)
 
 
 class CapturingLogger:

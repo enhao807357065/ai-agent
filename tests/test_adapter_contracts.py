@@ -131,6 +131,77 @@ def test_anthropic_complete_extracts_system_converts_tools_and_normalizes_respon
     ]
 
 
+
+
+def test_anthropic_replays_parallel_tool_results_as_one_user_message():
+    model = DeepSeekAnthropicModel(api_key="test")
+
+    system, messages = model._convert_messages([
+        {"role": "system", "content": "你是代码助手"},
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {"id": "call_search", "function": {"name": "search", "arguments": '{"q":"login"}'}},
+                {"id": "call_read", "function": {"name": "read", "arguments": '{"path":"auth.ts"}'}},
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_search", "content": "search result"},
+        {"role": "tool", "tool_call_id": "call_read", "content": "read result"},
+        {"role": "user", "content": "继续"},
+    ])
+
+    assert system == "你是代码助手"
+    assert messages == [
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "tool_use", "id": "call_search", "name": "search", "input": {"q": "login"}},
+                {"type": "tool_use", "id": "call_read", "name": "read", "input": {"path": "auth.ts"}},
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "call_search", "content": "search result"},
+                {"type": "tool_result", "tool_use_id": "call_read", "content": "read result"},
+            ],
+        },
+        {"role": "user", "content": "继续"},
+    ]
+
+
+def test_responses_replays_function_call_with_call_id_before_its_tool_output():
+    model = DeepSeekResponsesModel(api_key="test")
+
+    instructions, input_items = model._convert_messages_to_input([
+        {"role": "system", "content": "你是代码助手"},
+        {
+            "role": "assistant",
+            "tool_calls": [{
+                "id": "call_plan_1",
+                "function": {"name": "create_plan", "arguments": {"goal": "修复登录"}},
+            }],
+        },
+        {"role": "tool", "tool_call_id": "call_plan_1", "content": '{"planId":"p1"}'},
+    ])
+
+    assert instructions == "你是代码助手"
+    assert input_items == [
+        {
+            "type": "function_call",
+            "id": "call_plan_1",
+            "call_id": "call_plan_1",
+            "name": "create_plan",
+            "arguments": '{"goal": "\\u4fee\\u590d\\u767b\\u5f55"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_plan_1",
+            "output": '{"planId":"p1"}',
+        },
+    ]
+
+
 def test_responses_complete_uses_responses_contract_and_normalizes_function_call():
     response = SimpleNamespace(
         output_text="订单状态：已发货",

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from collections.abc import AsyncIterator
-from typing import Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 import structlog
 
@@ -89,6 +90,42 @@ class GatewayConfigurationError(Exception):
 
 class GatewayUpstreamRequestError(Exception):
     """上游拒绝请求（例如 400/401/403/422）；禁止 fallback。"""
+
+
+# 诊断日志允许记录上游稳定字段，但绝不能记录 prompt、tool arguments、Authorization 或原始 body。
+_SECRET_FIELD_NAMES = frozenset({"api_key", "authorization", "input", "messages", "prompt", "content", "tools", "arguments"})
+_SENSITIVE_TEXT = re.compile(r"(?:sk-[A-Za-z0-9_-]+|Bearer\s+\S+|api[_ -]?key\s*[:=]\s*\S+)", re.IGNORECASE)
+
+
+def upstream_rejection_diagnostics(exc: BaseException) -> dict[str, Any]:
+    """提取可行动但脱敏的上游 4xx 诊断，供服务端日志排查协议不兼容。"""
+    body = getattr(exc, "body", None)
+    if not isinstance(body, dict):
+        response = getattr(exc, "response", None)
+        try:
+            candidate = response.json() if response is not None else None
+        except Exception:  # 上游 body 不可解析时，宁可无诊断也不读取原始文本。
+            candidate = None
+        body = candidate if isinstance(candidate, dict) else {}
+
+    error = body.get("error", body)
+    error = error if isinstance(error, dict) else {}
+    fields = {
+        "upstream_status_code": getattr(exc, "status_code", None),
+        "upstream_error_type": error.get("type") or error.get("code"),
+        "upstream_error_code": error.get("code"),
+        "upstream_error_param": error.get("param"),
+        "upstream_error_message": error.get("message"),
+    }
+    safe: dict[str, Any] = {}
+    for name, value in fields.items():
+        if value is None or name in _SECRET_FIELD_NAMES:
+            continue
+        if isinstance(value, (str, int, float, bool)):
+            rendered = str(value)
+            if not _SENSITIVE_TEXT.search(rendered):
+                safe[name] = rendered[:500]
+    return safe
 
 
 class GatewayRateLimiter(Protocol):
@@ -276,6 +313,24 @@ class GatewayModelRouter:
                         error=str(exc),
                     )
                     await asyncio.sleep(delay)
+                except Exception as exc:
+                    status_code = getattr(exc, "status_code", None)
+                    if status_code not in {400, 401, 403, 422}:
+                        raise
+                    # 上游明确拒绝时不 retry/fallback；只记录脱敏协议诊断，公开响应仍由 API 层统一归一化。
+                    logger.warning(
+                        "gateway.upstream_request_rejected",
+                        logical_model=name,
+                        target_id=candidate.profile.id,
+                        provider=candidate.profile.provider,
+                        upstream_model=candidate.profile.model,
+                        stream=False,
+                        candidate_index=candidate_index,
+                        target_attempt=target_attempt,
+                        total_attempts=total_attempts,
+                        **upstream_rejection_diagnostics(exc),
+                    )
+                    raise
 
         logger.error(
             "gateway.request_failed",
@@ -403,6 +458,25 @@ class GatewayModelRouter:
                         error=str(exc),
                     )
                     await asyncio.sleep(delay)
+                except Exception as exc:
+                    status_code = getattr(exc, "status_code", None)
+                    if status_code not in {400, 401, 403, 422}:
+                        raise
+                    # 流尚未输出时也记录同一套脱敏字段；一旦已输出则客户端仍按中断语义处理。
+                    logger.warning(
+                        "gateway.upstream_request_rejected",
+                        logical_model=name,
+                        target_id=candidate.profile.id,
+                        provider=candidate.profile.provider,
+                        upstream_model=candidate.profile.model,
+                        stream=True,
+                        candidate_index=candidate_index,
+                        target_attempt=target_attempt,
+                        total_attempts=total_attempts,
+                        emitted_output=emitted_output,
+                        **upstream_rejection_diagnostics(exc),
+                    )
+                    raise
 
         logger.error(
             "gateway.request_failed",
