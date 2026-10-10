@@ -22,6 +22,12 @@ env/
 # Environment variables
 .env
 
+# Local sandbox-demo runtime artifacts (fixtures/config remain versioned)
+/week03-sandbox/opensandbox-demo/host-only-marker.txt
+/week03-sandbox/opensandbox-demo/sandbox-result.json
+/week03-sandbox/pi-boundary-demo/.env.demo
+/week03-sandbox/pi-boundary-demo/artifacts/
+
 # Logs
 *.log
 *.log.*
