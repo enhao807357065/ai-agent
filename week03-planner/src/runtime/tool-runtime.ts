@@ -13,7 +13,7 @@ import {
   updatePlanStepParameters,
 } from "../planning/plan-tools.js";
 import type { CodeVersionTracker } from "../planning/code-version.js";
-import { PlanStore } from "../planning/plan-store.js";
+import { PlanStore, PlanStoreError } from "../planning/plan-store.js";
 
 // 模型 Tool Call
 //   ↓
@@ -309,6 +309,9 @@ export class ToolRuntime {
     } catch (error) {
       if (error instanceof KnownToolError) {
         return failureResult(request.toolCallId, error.code, error.message);
+      }
+      if (error instanceof PlanStoreError) {
+        return failureResult(request.toolCallId, ToolResultCode.INVALID_ARGUMENT, `[${error.code}] ${error.message}`);
       }
       return failureResult(
         request.toolCallId,

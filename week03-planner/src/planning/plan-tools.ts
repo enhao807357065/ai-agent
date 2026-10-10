@@ -75,17 +75,19 @@ export const revisePlanParameters = Type.Object({
   expectedVersion: Type.Integer({ minimum: 1 }),
   reason: Type.String({ minLength: 1 }),
   evidenceIds: Type.Array(Type.String({ minLength: 1 })),
-  replacements: Type.Array(Type.Object({
+  replacements: Type.Optional(Type.Array(Type.Object({
     replaceStepId: Type.String({ minLength: 1 }),
     step: stepInput,
-  }, { additionalProperties: false })),
+  }, { additionalProperties: false }))),
   additions: Type.Optional(Type.Array(stepInput)),
 }, { additionalProperties: false });
 
 export type CreatePlanParameters = Static<typeof createPlanParameters>;
 export type GetPlanParameters = Static<typeof getPlanParameters>;
 export type UpdatePlanStepParameters = Static<typeof updatePlanStepParameters>;
-export type RevisePlanParameters = Static<typeof revisePlanParameters>;
+export interface RevisePlanParameters extends Omit<Static<typeof revisePlanParameters>, "replacements"> {
+  readonly replacements?: Static<typeof revisePlanParameters>["replacements"];
+}
 
 /** 供 Runtime 注册和 Pi adapter 暴露的稳定模型工具名称。 */
 export const PlanToolName = {
@@ -147,7 +149,11 @@ export class PlanToolHandlers {
   }
 
   revisePlan(input: RevisePlanParameters): Plan {
-    return this.store.revise(input.planId, input satisfies RevisePlanInput);
+    const { replacements = [], ...rest } = input;
+    return this.store.revise(input.planId, {
+      ...rest,
+      replacements,
+    });
   }
 }
 

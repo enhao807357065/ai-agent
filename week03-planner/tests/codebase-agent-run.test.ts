@@ -70,6 +70,29 @@ describe("Pi native codebase-agent assembly", () => {
     expect(codebaseAgentSystemPrompt).not.toContain("login-flow.md");
   });
 
+  it("continues from checkpoint messages without injecting a duplicate task prompt", async () => {
+    const fixture = await createFixture();
+    const observed: Context[] = [];
+    await run([{ kind: "final", text: "done" }], fixture.context, {
+      maxTurns: 1,
+      resumeMessages: [{ role: "user", content: "persisted task", timestamp: 1 }],
+    }, observed);
+    expect(observed[0].messages).toContainEqual(expect.objectContaining({ role: "user", content: "persisted task" }));
+    expect(observed[0].messages.filter((message) => message.role === "user" && message.content === "排查并修复 login_demo 的 access token 会话过期边界问题。先确认 token 签发、解析和鉴权链路；定义 now === expiresAt 时必须失效的边界；完成实现与边界验证，并报告未验证项。")).toHaveLength(0);
+  });
+
+  it("terminates the real Pi tool batch on approval-required, so no later model turn can bypass review", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.repositoryRoot, "src", "token.ts"), "export const expired = false;\n");
+    const approval = new (await import("../src/approval/source-write-approval.js")).SourceWriteApprovalGate();
+    const hook = new (await import("../src/approval/source-write-approval-hook.js")).SourceWriteApprovalHook(approval, fixture.context.repositoryRoot);
+    const result = await run([{ kind: "tool", id: "write-pending", name: ToolName.MODIFY_CODE, arguments: { path: "src/token.ts", oldText: "false", newText: "true" } }], fixture.context, {
+      sourceWriteApproval: hook,
+    });
+    expect(result.state.stopReason).toBe("waiting_for_approval");
+    expect(result.runtime.getHandlerExecutionCount("modify_code")).toBe(0);
+  });
+
   it("writes the first tool result back to the second model context with the same toolCallId", async () => {
     const fixture = await createFixture();
     const observed: Context[] = [];

@@ -1,5 +1,6 @@
 import {
   runAgentLoop,
+  runAgentLoopContinue,
   type AgentContext,
   type AgentEvent,
   type AgentLoopConfig,
@@ -7,6 +8,7 @@ import {
   type StreamFn,
 } from "@earendil-works/pi-agent-core";
 import type { Message, Model } from "@earendil-works/pi-ai";
+import { SourceWriteApprovalHook } from "../approval/source-write-approval-hook.js";
 import { PlanStore } from "../planning/plan-store.js";
 import {
   createRunExecutionContext,
@@ -109,11 +111,14 @@ export interface RunCodebaseAgentOptions {
   /** 可选任务覆写：planned repair mode 不继承旧的“写登录流程文档”教学目标。 */
   readonly systemPrompt?: string;
   readonly userTask?: string;
-  /** 教学 CLI 的结构化运行日志；仅记录控制流与受控元数据，不记录模型正文或工具结果正文。 */
+  /** 应用 checkpoint 恢复的既有 Pi 协议消息。只允许 CLI 在完成 fail-closed 检查后传入。 */
+  readonly resumeMessages?: readonly AgentMessage[];
   readonly onLog?: (message: string) => void;
   /** 可选 Planner 注入；提供后，写工具必须绑定正在运行的 planStepId。 */
   readonly planStore?: PlanStore;
   readonly planId?: string;
+  /** 可选人工审批 Hook：仅拦截 modify_code/apply_patch，批准仍只能消费被冻结的同一调用。 */
+  readonly sourceWriteApproval?: SourceWriteApprovalHook;
   readonly onTextDelta?: (text: string) => void;
 }
 
@@ -171,16 +176,25 @@ export async function runCodebaseAgent(
     ? ""
     : "\n当前 Run 受 PlanStore 治理：写入类工具必须携带正在运行步骤的 planStepId；工具成功不等于步骤 completed，必须等待服务端证据校验。";
   const initialPlanMessages = planStore === undefined ? [] : [createPlanSnapshotMessage(planStore, planId!)];
-  log(`run.started maxTurns=${options.maxTurns ?? defaultMaxTurns} planner=${planStore === undefined ? "disabled" : `enabled planId=${planId}`}`);
+  const restoredMessages = options.resumeMessages ? options.resumeMessages.filter(isModelMessage) : [];
+  log(`run.started maxTurns=${options.maxTurns ?? defaultMaxTurns} planner=${planStore === undefined ? "disabled" : `enabled planId=${planId}`} resumedMessages=${restoredMessages.length}`);
   if (planStore) log(`plan.snapshot.initial ${describePlan(planStore, planId!)}`);
   const context: AgentContext = {
     systemPrompt: `${options.systemPrompt ?? codebaseAgentSystemPrompt}${planRule}`,
-    messages: initialPlanMessages,
+    messages: [...restoredMessages.filter((message) => !isPlanSnapshotMessage(message)), ...initialPlanMessages],
     tools,
   };
 
   // 复用 Stop Center 的 Hook；装配层只接线，不在这里复制重复动作、证据或 Final 规则。
   const stopHooks = createRunStopHooks(stopCenter);
+  // 审批先于 Stop Center 的工具执行允许判定；它只返回 Pi 的 block 结果，不旁路 Runtime。
+  const approvalHook = options.sourceWriteApproval;
+  const originalBeforeToolCall = stopHooks.beforeToolCall;
+  const governedBeforeToolCall = async (hookContext: Parameters<NonNullable<typeof originalBeforeToolCall>>[0]) => {
+    const approval = approvalHook ? await approvalHook.beforeToolCall(hookContext) : undefined;
+    if (approval?.block && approval.reason?.startsWith("[APPROVAL_REQUIRED]")) stopCenter.waitForApproval();
+    return approval ?? originalBeforeToolCall?.(hookContext);
+  };
   // 回答的问题: Pi 应该怎样运行这个工作台？ 用哪个模型、工具串行还是并行、消息如何转换、生命周期 Hook 如何处理
   const config: AgentLoopConfig = {
     model: options.model,
@@ -191,6 +205,7 @@ export async function runCodebaseAgent(
     // Gateway 负责供应商重试；本地 Loop 不叠加 Provider retry。
     maxRetries: 0,
     ...stopHooks,
+    beforeToolCall: governedBeforeToolCall,
     // 每轮将旧的 planner snapshot 替换为当前快照，而非 append：模型只看到一个权威计划状态。
     prepareNextTurn: async (turn) => {
       if (!planStore) return undefined;
@@ -238,7 +253,18 @@ export async function runCodebaseAgent(
   //        │
   //        └─ 若模型自然 Final：
   //             └─ getFollowUpMessages
-  const messages = await runAgentLoop(
+  const messages = options.resumeMessages
+    ? await runAgentLoopContinue(context, config, async (event) => {
+      recordEvent(event, trace, () => ++turnCount, options.onTextDelta);
+      if (event.type === "turn_start") log(`turn.started number=${turnCount}`);
+      if (event.type === "tool_execution_start") log(`tool.executing name=${event.toolName} callId=${event.toolCallId}`);
+      if (event.type === "tool_execution_end") log(`tool.finished name=${event.toolName} callId=${event.toolCallId} isError=${event.isError}`);
+      if (event.type === "message_end" && event.message.role === "assistant") {
+        if (event.message.stopReason === "aborted") { assemblyStopReason ??= AssemblyStopReason.CANCELLED; log(`loop.stop reason=${AssemblyStopReason.CANCELLED} detail=model_stream_aborted`); }
+        else if (event.message.stopReason === "error") { assemblyStopReason ??= AssemblyStopReason.MODEL_ERROR; log(`loop.stop reason=${AssemblyStopReason.MODEL_ERROR} detail=model_stream_error`); }
+      }
+    }, options.signal, options.streamFn)
+    : await runAgentLoop(
     [createUserTaskMessage(options.userTask)],
     context,
     config,
@@ -305,9 +331,10 @@ function describePlan(store: PlanStore, planId: string): string {
 
 /** 计划快照作为普通 user message 注入；convertToLlm 保留它，避免使用 Pi 不认识的自定义消息类型。 */
 function createPlanSnapshotMessage(store: PlanStore, planId: string): AgentMessage {
+  const observationIds = store.observationToolCallIds();
   return {
     role: "user",
-    content: `[PLAN_STATE] ${store.snapshot(planId)}`,
+    content: `[PLAN_STATE] ${store.snapshot(planId)}\n[OBSERVATION_TOOL_CALL_IDS] ${JSON.stringify(observationIds)}\nnote Evidence 的 sourceToolCallIds 必须从这个服务端列表逐字复制；不得自行拼接路径或工具名。`,
     timestamp: Date.now(),
   };
 }

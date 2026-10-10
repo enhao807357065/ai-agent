@@ -1,0 +1,30 @@
+{
+  "enabled": true,
+  "sandboxUserShell": true,
+  "permissionPromptTimeoutSeconds": 30,
+  "allowBrowserProcess": false,
+  "network": {
+    "allowedDomains": [],
+    "deniedDomains": [],
+    "allowLocalBinding": false,
+    "allowAllUnixSockets": false,
+    "allowUnauthenticatedSocksProxy": false
+  },
+  "filesystem": {
+    "denyRead": [
+      "/Users",
+      "/home",
+      "/root"
+    ],
+    "allowRead": [
+      "."
+    ],
+    "allowWrite": [
+      "./artifacts"
+    ],
+    "denyWrite": [
+      ".env.demo",
+      ".pi"
+    ]
+  }
+}

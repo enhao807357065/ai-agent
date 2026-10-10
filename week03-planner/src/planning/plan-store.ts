@@ -249,6 +249,24 @@ export class PlanStore {
     return plan;
   }
 
+  /** 在 resume 前用已持久化的完整 Plan 重新建立内存 Store；不能直接篡改 #plans。 */
+  restore(plan: Plan): Plan {
+    if (this.#plans.has(plan.id)) throw new PlanStoreError("PLAN_EXISTS", `Plan ${plan.id} already exists.`);
+    validateGraph(plan.steps);
+    const restored = freezePlan({
+      ...plan,
+      constraints: [...plan.constraints],
+      steps: plan.steps.map((step) => ({ ...step, successCriteria: [...step.successCriteria], dependsOn: [...step.dependsOn], completionEvidenceIds: [...step.completionEvidenceIds] })),
+      evidence: plan.evidence.map((evidence) => ({ ...evidence, sourceToolCallIds: [...evidence.sourceToolCallIds] })),
+      revisions: plan.revisions.map((revision) => ({ ...revision, evidenceIds: [...revision.evidenceIds], replacedStepIds: [...revision.replacedStepIds], addedStepIds: [...revision.addedStepIds] })),
+    });
+    this.#plans.set(restored.id, restored);
+    for (const evidence of restored.evidence) {
+      for (const sourceToolCallId of evidence.sourceToolCallIds) this.#knownObservationToolCallIds.add(sourceToolCallId);
+    }
+    return restored;
+  }
+
   /** 返回冻结快照，调用方不能绕过 Store 直接篡改内存中的聚合状态。 */
   get(planId: string): Plan {
     const plan = this.#plans.get(planId);
@@ -281,6 +299,11 @@ export class PlanStore {
   /** afterToolCall 登记成功的只读观察；模型提交 note 时必须引用这里的真实 callId。 */
   recordObservationToolCall(toolCallId: string): void {
     if (toolCallId) this.#knownObservationToolCallIds.add(toolCallId);
+  }
+
+  /** 仅暴露本 Run 成功的只读观察 ID，供 Handler 在 note Evidence 入库时进行服务端绑定。 */
+  observationToolCallIds(): readonly string[] {
+    return Object.freeze([...this.#knownObservationToolCallIds]);
   }
 
   /** 记录证据时由 Store 补齐 owner stepId 与当前 codeVersion。

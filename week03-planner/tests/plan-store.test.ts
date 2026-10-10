@@ -11,6 +11,13 @@ import {
 import { PlanToolHandlers } from "../src/planning/plan-tools.js";
 
 describe("PlanStore", () => {
+  it("restores a persisted plan without exposing PlanStore internals", () => {
+    const source = new PlanStore("v1", new StepKindVerifier());
+    const created = source.create("resume-plan", [{ id: "diagnose", kind: StepKind.INVESTIGATION, title: "diagnose" }], { goal: "resume" });
+    const restored = new PlanStore("v1", new StepKindVerifier()).restore(created);
+    expect(restored).toEqual(created);
+  });
+
   it("starts only dependency-ready steps; failed and skipped dependencies never satisfy readiness", () => {
     const store = new PlanStore("v1");
     store.create("p", [{ id: "a", title: "A" }, { id: "b", title: "B", dependsOn: ["a"] }]);
@@ -106,8 +113,9 @@ describe("PlanStore", () => {
   it("adds an evidence-backed verification branch after diagnosis without forcing a fictitious implementation step", () => {
     const store = new PlanStore("v1", new StepKindVerifier());
     store.create("dynamic", [{ id: "diagnose", title: "diagnose", kind: StepKind.INVESTIGATION }]);
+    store.recordObservationToolCall("read-dynamic");
     store.start("dynamic", "diagnose");
-    store.recordEvidence("dynamic", "diagnose", [{ id: "found", kind: EvidenceKind.NOTE, summary: "existing implementation already meets the expiry boundary" }]);
+    store.recordEvidence("dynamic", "diagnose", [{ id: "found", kind: EvidenceKind.NOTE, summary: "existing implementation already meets the expiry boundary", sourceToolCallIds: ["read-dynamic"] }]);
     store.complete("dynamic", "diagnose", ["found"]);
 
     const revised = store.revise("dynamic", {

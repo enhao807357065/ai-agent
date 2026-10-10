@@ -14,6 +14,8 @@ export const StopReason = {
   REPEATED_ACTION: "repeated_action",
   MAX_TURNS_REACHED: "max_turns_reached",
   COMPLETION_CONTRACT_SATISFIED: "completion_contract_satisfied",
+  /** 写动作已冻结；只能由 CLI 的 approve/reject 控制面推进，模型不可自行继续。 */
+  WAITING_FOR_APPROVAL: "waiting_for_approval",
 } as const;
 export type StopReason = (typeof StopReason)[keyof typeof StopReason];
 export const StopDecisionCode = { REPEATED_ACTION: "repeated_action", FINAL_REJECTED: "FINAL_REJECTED" } as const;
@@ -115,6 +117,12 @@ export class RunStopCenter {
     return undefined;
   }
 
+  /** 审批 Hook 发现冻结 proposal 时调用；StopCenter 是唯一 Run 停止事实所有者。 */
+  waitForApproval(): void {
+    this.#setStopReason(StopReason.WAITING_FOR_APPROVAL);
+    this.#log(`loop.stop reason=${StopReason.WAITING_FOR_APPROVAL} detail=source_write_pending_human_decision`);
+  }
+
   afterToolCall(context: AfterToolCallContext): void {
     if (context.isError) {
       this.#log(`tool.failed name=${context.toolCall.name} callId=${context.toolCall.id} reason=pi_error`);
@@ -132,7 +140,10 @@ export class RunStopCenter {
       this.options.planStore.recordObservationToolCall(context.toolCall.id);
       this.#log(`plan.observation.recorded tool=${context.toolCall.name} callId=${context.toolCall.id}`);
     }
-    if (context.toolCall.name === ToolName.READ_FILE) {
+    if (context.toolCall.name === "update_plan_step" || context.toolCall.name === "revise_plan") {
+      try { this.#logPlanMutation(context.toolCall.name, context.args); } catch { /* tool itself is the source of the controlled failure */ }
+    }
+  if (context.toolCall.name === ToolName.READ_FILE) {
       const path = asNonEmptyString(context.args, "path");
       if (path) {
         this.#readSourceFiles.add(path);
@@ -211,6 +222,14 @@ export class RunStopCenter {
     return missing;
   }
   getState(): RunStopState { return Object.freeze({ runId: this.options.runId, currentTurn: this.#currentTurn, maxTurns: this.options.maxTurns, ...(this.#stopReason ? { stopReason: this.#stopReason } : {}), actionCounts: Object.freeze(Object.fromEntries(this.#actionCounts)), readSourceFiles: Object.freeze([...this.#readSourceFiles].sort()), writtenArtifacts: Object.freeze([...this.#writtenArtifacts].sort()), pendingFollowUps: Object.freeze([...this.#pendingFollowUps]) }); }
+  #logPlanMutation(toolName: "update_plan_step" | "revise_plan", args: unknown): void {
+    if (!this.options.planStore || !this.options.planId) return;
+    const plan = this.options.planStore.get(this.options.planId);
+    const statuses = plan.steps.map((step) => `${step.id}:${step.status}`).join(",");
+    const requestedAction = toolName === "update_plan_step" ? asNonEmptyString(args, "action") ?? "unknown" : undefined;
+    const stepId = toolName === "update_plan_step" ? asNonEmptyString(args, "stepId") : undefined;
+    this.#log(`plan.changed operation=${toolName} ${requestedAction ? `action=${requestedAction} ` : ""}${stepId ? `stepId=${stepId} ` : ""}version=${plan.version} steps=[${statuses}] revisions=${plan.revisions.length}`);
+  }
   #setStopReason(reason: StopReason): void { this.#stopReason ??= reason; }
   #log(message: string): void { this.options.onLog?.(`[run:${this.options.runId}] ${message}`); }
 }
