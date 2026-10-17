@@ -72,6 +72,7 @@ export class RunStopCenter {
     if ((options.planStore === undefined) !== (options.planId === undefined)) throw new Error("planStore and planId must be provided together.");
   }
 
+  // 检查计划依赖、重复动作和当前是否允许继续
   beforeToolCall(context: BeforeToolCallContext): BeforeToolCallResult | undefined {
     if (this.#stopReason) {
       this.#log(`tool.blocked name=${context.toolCall.name} callId=${context.toolCall.id} reason=${this.#stopReason}`);
@@ -123,6 +124,7 @@ export class RunStopCenter {
     this.#log(`loop.stop reason=${StopReason.WAITING_FOR_APPROVAL} detail=source_write_pending_human_decision`);
   }
 
+  // 消费实际执行结果、更新步骤和证据
   afterToolCall(context: AfterToolCallContext): void {
     if (context.isError) {
       this.#log(`tool.failed name=${context.toolCall.name} callId=${context.toolCall.id} reason=pi_error`);
@@ -169,6 +171,7 @@ export class RunStopCenter {
     }
   }
 
+  // 检查完成、等待、暂停和运行限制
   shouldStopAfterTurn(context: ShouldStopAfterTurnContext): boolean {
     if (this.#stopReason) {
       this.#log(`loop.stop reason=${this.#stopReason} detail=already_decided`);
@@ -239,6 +242,7 @@ export function createRunStopHooks(center: RunStopCenter) {
     beforeToolCall: async (context: BeforeToolCallContext): Promise<BeforeToolCallResult | undefined> => center.beforeToolCall(context),
     afterToolCall: async (context: AfterToolCallContext) => { center.afterToolCall(context); return undefined; },
     shouldStopAfterTurn: async (context: ShouldStopAfterTurnContext): Promise<boolean> => center.shouldStopAfterTurn(context),
+    // 在模型提前结束时，提供明确的完成缺项
     getFollowUpMessages: async (): Promise<AgentMessage[]> => center.takeFollowUpMessages(),
   };
 }

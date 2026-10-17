@@ -207,6 +207,7 @@ export async function runCodebaseAgent(
     ...stopHooks,
     beforeToolCall: governedBeforeToolCall,
     // 每轮将旧的 planner snapshot 替换为当前快照，而非 append：模型只看到一个权威计划状态。
+    // 准备下一轮使用的最新计划信息
     prepareNextTurn: async (turn) => {
       if (!planStore) return undefined;
       const removedSnapshots = turn.context.messages.filter(isPlanSnapshotMessage).length;
