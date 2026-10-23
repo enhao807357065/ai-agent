@@ -39,6 +39,10 @@ Thumbs.db
 
 # Database
 *.sql.bak
+*.sqlite
+
+# LangGraph demo runtime artifacts
+/week03-langgraph/demos/**/reports/
 
 # Testing
 .pytest_cache/
