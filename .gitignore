@@ -48,3 +48,9 @@ Thumbs.db
 .pytest_cache/
 .coverage
 htmlcov/
+
+# LangGraph dev-server and visualization outputs
+/week03-langgraph/demos/**/.langgraph_api/
+/week03-langgraph/demos/**/visualizations/
+
+samples/*
