@@ -1,0 +1,55 @@
+# 任务知识由 src/tasks.ts 统一读取；相对路径相对 config/ 目录。
+tasks:
+  understand:
+    display_name: 任务一 · 代码理解（把登录逻辑写成说明文档）
+    match: [登录逻辑, 调用链, 代码理解, 说明文档]
+    workspace: ../samples/1_login_demo
+    script: scripts/understand-login.yaml
+    deliverable: artifacts/login-flow.md
+    brief: |
+      这一类任务的交付物是一份写给新同事的登录调用链说明，不是代码改动。
+      先定位再阅读，没读过的文件不要描述它的实现；唯一的写操作就是这份文档本身。
+      文档结论必须带文件与行号依据，并单列不能照搬到生产的事实。
+    budget:
+      max_turns: 50
+      max_tool_calls: 100
+    approval:
+      gate: auto
+      via: http
+      approvers: [maintainer]
+
+  fix_tests:
+    display_name: 任务二 · 测试生成与修复（让失败用例变绿）
+    match: [修复, 失败用例, 补充测试, 缺陷]
+    workspace: ../samples/2_bug_fix/demo-app
+    script: scripts/fix-session-boundary.yaml
+    test_command: ["npm", "test", "--"]
+    deliverable: src/auth/session-policy.ts
+    deny_write_extra: ["tests/**"]
+    allow_write_extra: ["tests/generated/**"]
+    brief: |
+      这一类任务以 run_test 的退出码为唯一验收标准。
+      新增测试只写到 tests/generated/；已有测试一行都不许改。
+    budget:
+      max_turns: 15
+      max_tool_calls: 100
+    approval:
+      gate: [run_test]
+      via: http
+      approvers: [maintainer, tech_lead]
+
+  debt_audit:
+    display_name: 任务三 · 技术债巡检（纯配置新增的那一类）
+    match: [技术债, 巡检, 遗留标记]
+    workspace: ../samples/1_login_demo
+    script: scripts/debt-audit.yaml
+    deliverable: docs/tech-debt-audit.md
+    brief: |
+      扫描 TODO、FIXME、Demo-only 一类技术债标记，汇总命中位置、原文和风险判断。
+      一次检索、一份报告、一次 git_status 复查，不改动任何源码。
+    budget:
+      max_turns: 6
+      max_tool_calls: 6
+    approval:
+      gate: none
+      via: local

@@ -1,0 +1,88 @@
+gateway:
+  # 对接自己的 ai-agent/app：逻辑模型由 Gateway 决定具体上游。
+  provider_id: ai-agent-gateway
+  base_url: http://127.0.0.1:8000/v1
+  api_key_env: GATEWAY_API_KEY
+  model_id: chat-default
+  model_name: AI Agent Gateway Chat Default
+  prompt_name: codebase.agent
+  prompt_version: v1
+
+deepseek:
+  # 直连 DeepSeek 原生 OpenAI Chat Completions API；不经过本地 Gateway。
+  base_url: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  model_id: deepseek-v4-flash
+  model_name: DeepSeek V4 Flash
+
+prompt:
+  source: local
+  file: prompts.yaml
+
+model:
+  # gateway（默认）或 deepseek；CLI 的 --provider 可覆盖。
+  provider: gateway
+  context_window: 128000
+  max_tokens: 4096
+  input_per_million: 0.3
+  output_per_million: 1.2
+  cache_read_per_million: 0.006
+
+runtime:
+  database: ../data/platform.db
+  max_turns: 8
+  max_tool_calls: 12
+  max_repeated_call: 2
+  max_total_tokens: 30000
+  max_cost_usd: 0.25
+  max_duration_ms: 120000
+  context:
+    keep_recent_turns: 2
+    audit_max_lines: 30
+    audit_max_chars: 4000
+    max_input_tokens: 65535
+
+hitl:
+  mode: disabled
+  gate: auto
+  base_url: http://127.0.0.1:8383
+  api_key_env: HITL_API_KEY
+  approvers: [maintainer]
+  timeout_ms: 5000
+  wait_timeout_ms: 120000
+
+policy:
+  role_permissions:
+    reviewer: ["repo:read", "git:read"]
+    developer: ["repo:read", "repo:write", "git:read"]
+    maintainer: ["repo:read", "repo:write", "repo:execute", "git:read"]
+  agent_tool_allowlist:
+    codebase-agent:
+      - list_files
+      - search_code
+      - read_file
+      - read_directory
+      - write_file
+      - apply_patch
+      - run_test
+      - run_command
+      - git_diff
+      - git_status
+
+sandbox:
+  root: ../samples/1_login_demo
+  deny_read: ["**/.env", "**/.env.*", "**/*.pem", "**/*.key"]
+  deny_write: [package.json, package-lock.json, tsconfig.json, "**/node_modules/**", ".git/**"]
+  allow_write: []
+  max_read_chars: 12000
+  max_output_chars: 12000
+  max_capture_bytes: 4194304
+  command_timeout_ms: 20000
+  kill_grace_ms: 2000
+  secret_env_pattern: "(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL)$"
+
+tasks:
+  file: tasks.yaml
+
+tools:
+  test_command: []
