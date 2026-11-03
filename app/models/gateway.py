@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class ProviderTarget(BaseModel):
@@ -136,12 +136,25 @@ class OpenAIChatFunctionTool(BaseModel):
 
 
 class OpenAIChatMessage(BaseModel):
-    """OpenAI Chat Completions message；保留 tool call 原始 JSON 字符串。"""
+    """OpenAI Chat Completions message。
+
+    对外接收 legacy string content 和新版 text content parts；进入内部模型路由前，
+    text parts 会归一化成 string，因此现有 TAL / DeepSeek adapter 不需要变化。
+    """
 
     role: Literal["system", "user", "assistant", "tool"]
-    content: str | None = None
+    content: str | list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
+
+    @field_validator("content")
+    @classmethod
+    def only_accept_text_content_parts(cls, content: str | list[dict[str, Any]] | None):
+        if not isinstance(content, list):
+            return content
+        if any(not isinstance(part, dict) or part.get("type") != "text" or not isinstance(part.get("text"), str) for part in content):
+            raise ValueError("Only text content parts are supported.")
+        return content
 
 
 class OpenAIChatCompletionRequest(BaseModel):

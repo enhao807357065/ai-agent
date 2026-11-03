@@ -9,6 +9,7 @@ FastAPI 应用入口
 import asyncio
 import time
 import uuid
+from typing import Any
 
 import structlog
 from fastapi import FastAPI, Request
@@ -39,8 +40,26 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(RequestValidationError)
     async def gateway_validation_error_handler(request: Request, exc: RequestValidationError):
-        """Gateway 的请求校验也使用统一错误 envelope；其他 API 保持 FastAPI 默认格式。"""
+        """Gateway 校验失败：对客户端保持稳定错误，对服务端记录脱敏字段形状。"""
         if request.url.path in {"/v1/chat/completions", "/v1/responses", "/v1/messages"}:
+            def summarize_validation_error(error: dict[str, Any]) -> dict[str, Any]:
+                value = error.get("input")
+                return {
+                    "loc": list(error.get("loc", ())),
+                    "type": error.get("type"),
+                    "message": error.get("msg"),
+                    "input_type": type(value).__name__,
+                    "input_list_length": len(value) if isinstance(value, list) else None,
+                    "part_types": [part.get("type") for part in value if isinstance(part, dict)] if isinstance(value, list) else None,
+                }
+
+            structlog.get_logger(__name__).warning(
+                "gateway.request_validation_failed",
+                method=request.method,
+                path=request.url.path,
+                error_count=len(exc.errors()),
+                validation_errors=[summarize_validation_error(error) for error in exc.errors()],
+            )
             return JSONResponse(
                 status_code=422,
                 content={

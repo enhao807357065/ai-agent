@@ -41,6 +41,7 @@ from app.models.gateway import (
     OpenAIChatCompletionDelta,
     OpenAIChatCompletionFunctionCall,
     OpenAIChatCompletionMessage,
+    OpenAIChatMessage,
     OpenAIChatCompletionRequest,
     OpenAIChatCompletionResponse,
     OpenAIChatCompletionToolCall,
@@ -210,11 +211,20 @@ def _to_model_call(request: GatewayRequest) -> GatewayModelCall:
     )
 
 
+def _normalize_openai_message(message: OpenAIChatMessage) -> dict[str, Any]:
+    """将 OpenAI text content parts 收敛为现有内部 string content。"""
+    normalized = message.model_dump(exclude_none=True)
+    content = normalized.get("content")
+    if isinstance(content, list):
+        normalized["content"] = "\n".join(part["text"] for part in content)
+    return normalized
+
+
 def _openai_to_model_call(request: OpenAIChatCompletionRequest) -> GatewayModelCall:
     """OpenAI Chat Completions 请求 → Gateway canonical call。"""
     max_tokens = request.max_completion_tokens or request.max_tokens or 4096
     return GatewayModelCall(
-        messages=[message.model_dump(exclude_none=True) for message in request.messages],
+        messages=[_normalize_openai_message(message) for message in request.messages],
         tools=[tool.model_dump() for tool in request.tools] if request.tools else None,
         tool_choice=request.tool_choice,
         temperature=request.temperature,

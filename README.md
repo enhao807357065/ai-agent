@@ -2,6 +2,10 @@
 
 从零构建 AI Agent 的实践项目，覆盖 LLM 调用、Agent 循环、流式服务、结构化输出、持久化等核心能力。
 
+## 第三章作业：Guarded Coding Harness（Week 03）
+
+> 作业代码位于项目根目录下的 [`week03-homework/`](week03-homework/)。完整运行说明、真实模型运行记录、审计记录、Checkpoint 恢复与验收证据见：[`GUARDED_HARNESS_RUNBOOK.md`](week03-homework/GUARDED_HARNESS_RUNBOOK.md)。
+
 ## 作业二：工具调用治理（Week 02）
 
 > 作业代码放在项目根目录下的 `week02/`，为便于学习和验收，Demo 与测试文件并列存放：
