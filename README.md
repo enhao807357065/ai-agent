@@ -2,6 +2,15 @@
 
 从零构建 AI Agent 的实践项目，覆盖 LLM 调用、Agent 循环、流式服务、结构化输出、持久化等核心能力。
 
+## 第四章作业：项目长期记忆与局部同步 RAG（Week 04）
+
+> 作业代码位于 [`week04-homework/`](week04-homework/)，完整说明见：[`week04-homework/homework.md`](week04-homework/homework.md)。
+>
+> - **第一部分：Pi + OKF**：验证项目长期记忆的初始化、跨会话检索、测试入口维护与回写。
+> - **第二部分：LlamaIndex 双路 RAG**：使用本地 BGE + Milvus Lite 建立向量检索，使用 BM25 建立关键词检索，通过 RRF 融合结果并由 DeepSeek 基于证据回答；支持根据 `corpus/` 的手工修改执行文档级局部同步。
+>
+> RAG 首次初始化、局部同步和查询命令，以及截图和引用证据说明，都已整理在上述作业文档中。
+
 ## 第三章作业：Guarded Coding Harness（Week 03）
 
 > 作业代码位于项目根目录下的 [`week03-homework/`](week03-homework/)。完整运行说明、真实模型运行记录、审计记录、Checkpoint 恢复与验收证据见：[`GUARDED_HARNESS_RUNBOOK.md`](week03-homework/GUARDED_HARNESS_RUNBOOK.md)。

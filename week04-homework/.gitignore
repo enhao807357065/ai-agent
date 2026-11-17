@@ -1,0 +1,16 @@
+# Python bytecode and local environment
+__pycache__/
+*.py[cod]
+.venv/
+
+# JavaScript dependencies and build output
+login_demo/node_modules/
+login_demo/dist/
+
+# Generated indexes and run evidence
+rag/storage/
+rag/milvus_login_demo.db/
+rag/run_output.txt
+
+# Local API credentials
+rag/.env
