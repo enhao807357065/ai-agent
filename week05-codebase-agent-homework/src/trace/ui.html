@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Agent 对话轨迹图</title>
+<style>
+  :root {
+    --bg: #080b13;
+    --panel: #0e1524;
+    --panel-2: #131c2e;
+    --line: #1e293b;
+    --line-soft: #182135;
+    --text: #e6edf7;
+    --muted: #8ba0bb;
+    --faint: #5b6f8c;
+    --run: #a78bfa;
+    --turn: #64748b;
+    --model: #38bdf8;
+    --tool: #34d399;
+    --approval: #f59e0b;
+    --error: #ef4444;
+    --blocked: #fb923c;
+    --waiting: #fbbf24;
+    --label-w: 340px;
+    --track-w: 900px;
+    --grid: 80px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: radial-gradient(1200px 600px at 15% -10%, #17233a 0%, var(--bg) 55%) fixed;
+    color: var(--text);
+    font: 13px/1.55 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .mono { font-family: "SF Mono", ui-monospace, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+  header.top {
+    display: flex; align-items: flex-end; justify-content: space-between; gap: 24px;
+    padding: 22px 26px 14px; border-bottom: 1px solid var(--line-soft);
+    background: linear-gradient(180deg, rgba(14,21,36,.9), rgba(8,11,19,0));
+  }
+  .brand h1 { margin: 0; font-size: 19px; letter-spacing: .2px; font-weight: 650; }
+  .brand h1 span { color: var(--model); }
+  .brand p { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+  .controls { display: flex; align-items: center; gap: 10px; }
+  select, button {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 10px; font-size: 12px; outline: none;
+  }
+  select { max-width: 460px; }
+  button { cursor: pointer; }
+  button:hover { border-color: #334155; background: #17233a; }
+  .switch { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; cursor: pointer; user-select: none; }
+  .switch input { accent-color: var(--tool); }
+  main { padding: 16px 26px 40px; max-width: 1900px; margin: 0 auto; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); gap: 10px; margin-bottom: 14px; }
+  .stat { background: var(--panel); border: 1px solid var(--line-soft); border-radius: 10px; padding: 10px 13px; }
+  .stat .k { color: var(--faint); font-size: 11px; letter-spacing: .3px; }
+  .stat .v { font-size: 20px; font-weight: 640; margin-top: 2px; letter-spacing: .2px; }
+  .stat .h { color: var(--muted); font-size: 11px; margin-top: 1px; }
+  .stat.err .v { color: var(--error); }
+  .overview { display: flex; align-items: center; gap: 16px; background: var(--panel); border: 1px solid var(--line-soft); border-radius: 10px; padding: 11px 14px; margin-bottom: 12px; }
+  .overview .title { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .stack { display: flex; height: 10px; flex: 1; border-radius: 6px; overflow: hidden; background: #0b1220; }
+  .stack div { height: 100%; }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; color: var(--muted); font-size: 11px; }
+  .legend i { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 5px; }
+  .chips { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  .chip { background: transparent; border: 1px solid var(--line); color: var(--muted); border-radius: 999px; padding: 4px 12px; font-size: 12px; cursor: pointer; }
+  .chip.on { color: var(--text); border-color: #3b82f6; background: rgba(56,189,248,.10); }
+  .zoom { margin-left: auto; display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11px; }
+  .zoom input { width: 130px; accent-color: var(--model); }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) 390px; gap: 12px; align-items: start; }
+  .card { background: var(--panel); border: 1px solid var(--line-soft); border-radius: 12px; overflow: hidden; }
+  /* 不设 max-height：一次对话要能整页读完，滚动交给页面本身；横向溢出仍然在这里滚。 */
+  .scroll { overflow-x: auto; overflow-y: visible; }
+  .rows { width: max-content; min-width: 100%; }
+  .row { display: flex; align-items: stretch; border-bottom: 1px solid rgba(30,41,59,.55); cursor: pointer; }
+  .row:hover .label-col { background: #141e31; }
+  .row.sel .label-col { background: #16233a; box-shadow: inset 3px 0 0 var(--model); }
+  .row.sel .track { background: rgba(56,189,248,.045); }
+  .label-col {
+    position: sticky; left: 0; z-index: 3; flex: 0 0 var(--label-w); width: var(--label-w);
+    background: var(--panel); border-right: 1px solid var(--line);
+    padding: 4px 10px 5px 12px; display: flex; flex-direction: column; justify-content: center; gap: 1px; min-height: 38px;
+  }
+  .ln1 { display: flex; align-items: center; gap: 6px; min-width: 0; width: 100%; }
+  .ln2 { color: var(--faint); font-size: 10px; padding-left: 13px; letter-spacing: .1px; }
+  .row.status-error .ln2, .row.status-blocked .ln2, .row.status-rejected .ln2 { color: #b97575; }
+  .row.head { position: sticky; top: 0; z-index: 5; background: var(--panel-2); }
+  .row.head .label-col { background: var(--panel-2); color: var(--faint); font-size: 11px; letter-spacing: .4px; font-weight: 600; z-index: 6; }
+  .row.head .track { background: transparent; }
+  .track { position: relative; flex: 0 0 var(--track-w); width: var(--track-w); min-height: 30px; background-image: repeating-linear-gradient(to right, rgba(148,163,184,.09) 0 1px, transparent 1px var(--grid)); }
+  .row.head .label-col { min-height: 30px; }
+  .row.head .track { min-height: 30px; }
+  .badge { flex: none; font-size: 10px; line-height: 16px; padding: 0 6px; border-radius: 4px; border: 1px solid currentColor; opacity: .95; }
+  .badge.run { color: var(--run); } .badge.turn { color: #94a3b8; } .badge.model { color: var(--model); }
+  .badge.tool { color: var(--tool); } .badge.approval { color: var(--approval); } .badge.plan { color: #c084fc; }
+  .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .nm .sub { color: var(--faint); font-size: 11px; margin-left: 6px; }
+  .row.kind-turn .label-col { font-weight: 600; color: #cfe0f5; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
+  .dot.error, .dot.blocked, .dot.rejected { background: var(--error); box-shadow: 0 0 0 3px rgba(239,68,68,.18); }
+  .dot.ok { background: #22c55e; }
+  .dot.waiting, .dot.approved { background: var(--waiting); }
+  .dot.running { background: var(--model); animation: pulse 1.2s infinite; }
+  @keyframes pulse { 50% { opacity: .35; } }
+  .bar { position: absolute; top: 50%; transform: translateY(-50%); height: 14px; border-radius: 4px; min-width: 3px; opacity: .92; }
+  .bar.kind-run { height: 18px; background: linear-gradient(90deg, rgba(167,139,250,.75), rgba(167,139,250,.42)); }
+  .bar.kind-turn { height: 26px; border-radius: 3px; background: rgba(148,163,184,.13); border-left: 2px solid rgba(148,163,184,.75); border-right: 2px solid rgba(148,163,184,.75); }
+  .bar.kind-model { background: linear-gradient(90deg, #0ea5e9, #38bdf8); }
+  .bar.kind-tool { background: linear-gradient(90deg, #059669, #34d399); }
+  .bar.kind-approval { background: linear-gradient(90deg, #d97706, #fbbf24); }
+  .bar.kind-plan { background: linear-gradient(90deg, #7c3aed, #c084fc); }
+  .bar.st-error { background: linear-gradient(90deg, #b91c1c, #ef4444); }
+  .bar.st-blocked, .bar.st-rejected { background: repeating-linear-gradient(45deg, #7f1d1d 0 6px, #ef4444 6px 12px); }
+  .bar.st-waiting { background: repeating-linear-gradient(45deg, rgba(245,158,11,.55) 0 6px, rgba(251,191,36,.9) 6px 12px); }
+
+  .ticks span.end { transform: translateX(-100%); }
+  .ticks span { position: absolute; top: 8px; transform: translateX(-50%); font-size: 10px; color: var(--faint); }
+  .ticks span:first-child { transform: none; }
+  .detail { position: sticky; top: 12px; max-height: calc(100vh - 40px); overflow: auto; }
+  .detail .empty { padding: 30px 18px; color: var(--faint); text-align: center; font-size: 12px; line-height: 1.8; }
+  .detail .dhead { padding: 14px 16px 12px; border-bottom: 1px solid var(--line-soft); }
+  .detail h2 { margin: 0 0 6px; font-size: 15px; font-weight: 640; word-break: break-all; }
+  .detail .dmeta { color: var(--muted); font-size: 11.5px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .detail .body { padding: 12px 16px 18px; }
+  .kv { display: grid; grid-template-columns: 92px minmax(0,1fr); gap: 4px 10px; font-size: 12px; }
+  .kv .k { color: var(--faint); }
+  .kv .v { color: #d6e2f2; word-break: break-word; }
+  .sec { margin-top: 14px; }
+  .sec h3 { margin: 0 0 6px; font-size: 11px; color: var(--faint); font-weight: 600; letter-spacing: .4px; text-transform: uppercase; }
+  pre { margin: 0; background: #0a1120; border: 1px solid var(--line-soft); border-radius: 8px; padding: 9px 10px; font-size: 11px; line-height: 1.6; color: #c8d7ea; white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow: auto; }
+  .errbox { margin-top: 12px; border: 1px solid rgba(239,68,68,.45); background: rgba(239,68,68,.08); border-radius: 8px; padding: 9px 10px; color: #fecaca; font-size: 12px; white-space: pre-wrap; }
+  details summary { cursor: pointer; color: var(--faint); font-size: 11px; margin-top: 12px; }
+  .pill { font-size: 10.5px; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; }
+  .pill.ok, .pill.approved { color: #4ade80; } .pill.error, .pill.blocked, .pill.rejected { color: #f87171; }
+  .pill.waiting, .pill.running { color: var(--waiting); }
+  .banner { margin-bottom: 12px; border: 1px solid rgba(245,158,11,.4); background: rgba(245,158,11,.08); color: #fcd34d; border-radius: 10px; padding: 10px 14px; font-size: 12px; }
+  .foot { padding: 9px 14px; color: var(--faint); font-size: 11px; border-top: 1px solid var(--line-soft); display: flex; gap: 16px; flex-wrap: wrap; }
+  @media (max-width: 1200px) {
+    :root { --label-w: 260px; }
+    .layout { grid-template-columns: minmax(0,1fr); }
+    .detail { position: static; max-height: none; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <h1>Agent 对话轨迹图 <span>· trace</span></h1>
+    <p>一次完整对话的轮次、模型调用与工具调用时间轴（数据来自 trace_spans 真实时钟）</p>
+  </div>
+  <div class="controls">
+    <select id="run-select" title="选择一次对话"></select>
+    <button id="refresh" title="重新拉取">刷新</button>
+    <button id="export" title="导出当前轨迹 JSON">导出</button>
+    <label class="switch"><input type="checkbox" id="live" /> 实时</label>
+  </div>
+</header>
+
+<main>
+  <div id="banner"></div>
+  <section class="stats" id="stats"></section>
+  <section class="overview" id="overview" hidden></section>
+  <div class="chips" id="chips">
+    <button class="chip on" data-filter="all">全部</button>
+    <button class="chip" data-filter="model">只看模型</button>
+    <button class="chip" data-filter="tool">只看工具</button>
+    <button class="chip" data-filter="approval">只看审批</button>
+    <button class="chip" data-filter="errors">只看异常</button>
+    <div class="zoom">缩放 <input type="range" id="zoom" min="1" max="8" step="0.25" value="1" /> <span id="zoom-label">1.0×</span></div>
+  </div>
+
+  <div class="layout">
+    <section class="card">
+      <div class="scroll" id="scroll">
+        <div class="rows" id="rows"></div>
+      </div>
+      <div class="foot" id="foot"></div>
+    </section>
+    <aside class="card detail" id="detail"></aside>
+  </div>
+</main>
+
+<script>
+const LABEL_W = () => parseInt(getComputedStyle(document.documentElement).getPropertyValue("--label-w"), 10) || 340;
+const KIND_LABEL = { run: "对话", turn: "轮次", model: "模型", tool: "工具", approval: "审批", plan: "计划" };
+const STATUS_LABEL = { ok: "成功", error: "失败", running: "进行中", blocked: "被拦截", rejected: "被拒绝", waiting: "等待审批", approved: "已批准" };
+const KIND_COLOR = { run: "#a78bfa", turn: "#64748b", model: "#38bdf8", tool: "#34d399", approval: "#f59e0b", plan: "#c084fc" };
+
+const state = { traces: [], trace: null, filter: "all", zoom: 1, selected: null, live: false, timer: null, raw: "" };
+
+const $ = (id) => document.getElementById(id);
+const esc = (value) => String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+function fmtDuration(ms) {
+  if (ms == null) return "—";
+  if (ms < 1000) return `${Math.round(ms)} ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)} s`;
+  const m = Math.floor(ms / 60000);
+  return `${m}m ${((ms % 60000) / 1000).toFixed(1)}s`;
+}
+/** 详情里的时间戳统一成本地时钟：一处 ISO（Z）一处本地时间，读者要自己减 8 小时才能对上。 */
+function fmtIso(value) {
+  if (!value) return "—";
+  const ms = Date.parse(value);
+  if (Number.isNaN(ms)) return String(value);
+  const d = new Date(ms);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${fmtClock(ms)}`;
+}
+function fmtClock(ms) {
+  const d = new Date(ms);
+  const p = (n, w = 2) => String(n).padStart(w, "0");
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}.${p(d.getMilliseconds(), 3)}`;
+}
+function fmtOffset(ms) {
+  if (ms === 0) return "0";
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(ms < 10000 ? 2 : 1)}s`;
+}
+function shortId(id) { return id ? String(id).slice(0, 8) : "—"; }
+
+async function api(path) {
+  const response = await fetch(path, { cache: "no-store" });
+  if (!response.ok) throw new Error(`${response.status} ${await response.text()}`);
+  return response.json();
+}
+
+async function boot() {
+  bind();
+  const data = await api("/api/runs");
+  state.traces = data.runs || [];
+  renderSelect();
+  const wanted = new URLSearchParams(location.search).get("trace");
+  const target = wanted || (state.traces[0] && state.traces[0].traceId);
+  if (target) {
+    $("run-select").value = target;
+    await loadTrace(target);
+  } else {
+    $("rows").innerHTML = `<div class="empty" style="padding:40px;color:#5b6f8c">还没有采集到任何对话。跑一次 <code>npm run agent -- "..."</code> 再刷新。</div>`;
+    renderStats(null);
+  }
+}
+
+function bind() {
+  $("run-select").addEventListener("change", (event) => loadTrace(event.target.value));
+  $("refresh").addEventListener("click", () => loadTrace($("run-select").value));
+  $("zoom").addEventListener("input", (event) => {
+    state.zoom = Number(event.target.value);
+    $("zoom-label").textContent = `${state.zoom.toFixed(1)}×`;
+    render();
+  });
+  $("live").addEventListener("change", (event) => {
+    state.live = event.target.checked;
+    if (state.live) state.timer = setInterval(() => loadTrace($("run-select").value, true), 2000);
+    else clearInterval(state.timer);
+  });
+  $("export").addEventListener("click", () => {
+    if (!state.trace) return;
+    const blob = new Blob([JSON.stringify(state.trace, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `trace-${state.trace.traceId}.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+  document.querySelectorAll(".chip").forEach((chip) => chip.addEventListener("click", () => {
+    document.querySelectorAll(".chip").forEach((item) => item.classList.toggle("on", item === chip));
+    state.filter = chip.dataset.filter;
+    render();
+  }));
+  window.addEventListener("resize", () => render());
+}
+
+function renderSelect() {
+  $("run-select").innerHTML = state.traces.map((trace) => {
+    const when = new Date(trace.startedAt).toLocaleString("zh-CN", { hour12: false });
+    return `<option value="${esc(trace.traceId)}">${esc(when)} · ${esc(trace.title)} · ${fmtDuration(trace.totalMs)}</option>`;
+  }).join("");
+}
+
+async function loadTrace(traceId, quiet = false) {
+  if (!traceId) return;
+  const trace = await api(`/api/trace/${encodeURIComponent(traceId)}`);
+  const signature = `${trace.totalMs}|${trace.stats.spanCount}|${trace.stats.status}|${trace.nodes.filter((n) => n.status === "running").length}`;
+  if (quiet && signature === state.raw) return; // 实时模式没新数据就不重绘，避免打断阅读
+  state.raw = signature;
+  state.trace = trace;
+  history.replaceState(null, "", `?trace=${encodeURIComponent(traceId)}`);
+  render();
+}
+
+function render() {
+  const trace = state.trace;
+  renderStats(trace);
+  renderOverview(trace);
+  renderBanner(trace);
+  renderRows(trace);
+  renderDetail(trace);
+}
+
+function renderBanner(trace) {
+  const host = $("banner");
+  if (trace && trace.legacy) {
+    host.innerHTML = `<div class="banner">该对话产生于轨迹采集上线之前：只有事件流水，没有 span 时间轴。重新跑一次 <code>npm run agent -- "..."</code> 即可采集。</div>`;
+  } else {
+    host.innerHTML = "";
+  }
+}
+
+function renderStats(trace) {
+  const host = $("stats");
+  if (!trace) { host.innerHTML = ""; return; }
+  const stats = trace.stats;
+  const cards = [
+    { k: "总运行时长", v: fmtDuration(trace.totalMs), h: `${fmtClock(Date.parse(trace.startedAt))} 起` },
+    { k: "轮次", v: String(stats.turns), h: `平均 ${stats.turns ? fmtDuration(trace.totalMs / stats.turns) : "—"}/轮` },
+    { k: "模型调用", v: String(stats.modelCalls), h: `合计 ${fmtDuration(stats.modelMs)}` },
+    { k: "工具调用", v: String(stats.toolCalls), h: `合计 ${fmtDuration(stats.toolMs)}` },
+    { k: "审批门槛", v: String(stats.approvalGates ?? stats.approvals), h: `人工等待 ${stats.humanApprovals ?? 0} 次 · 自动审批 ${stats.autoApprovals ?? 0} 次 · ${fmtDuration(stats.approvalWaitMs)}` },
+    { k: "异常", v: String(stats.errors), h: stats.stop ? `结束：${stats.stop}` : "无异常的调用", err: stats.errors > 0 },
+  ];
+  host.innerHTML = cards.map((card) => `
+    <div class="stat ${card.err ? "err" : ""}">
+      <div class="k">${card.k}</div>
+      <div class="v mono">${card.v}</div>
+      <div class="h">${esc(card.h)}</div>
+    </div>`).join("");
+}
+
+function renderOverview(trace) {
+  const host = $("overview");
+  if (!trace || !trace.totalMs || trace.legacy) { host.hidden = true; return; }
+  host.hidden = false;
+  const total = trace.totalMs;
+  const model = trace.stats.modelMs;
+  const tool = trace.stats.toolMs;
+  const approval = trace.stats.approvalWaitMs;
+  const idle = Math.max(0, total - model - tool - approval);
+  const pct = (value) => `${((value / total) * 100).toFixed(2)}%`;
+  host.innerHTML = `
+    <span class="title">时间构成</span>
+    <div class="stack">
+      <div style="width:${pct(model)};background:var(--model)" title="模型 ${fmtDuration(model)}"></div>
+      <div style="width:${pct(tool)};background:var(--tool)" title="工具 ${fmtDuration(tool)}"></div>
+      <div style="width:${pct(approval)};background:var(--approval)" title="人工审批 ${fmtDuration(approval)}"></div>
+      <div style="width:${pct(idle)};background:#243349" title="调度/等待 ${fmtDuration(idle)}"></div>
+    </div>
+    <div class="legend">
+      <span><i style="background:var(--model)"></i>模型 ${fmtDuration(model)}</span>
+      <span><i style="background:var(--tool)"></i>工具 ${fmtDuration(tool)}</span>
+      <span><i style="background:var(--approval)"></i>人工审批 ${fmtDuration(approval)}</span>
+      <span><i style="background:#243349"></i>调度/等待 ${fmtDuration(idle)}</span>
+    </div>`;
+}
+
+function visible(node) {
+  if (state.filter === "all") return true;
+  if (node.kind === "run" || node.kind === "turn") return true;
+  if (state.filter === "errors") return ["error", "blocked", "rejected"].includes(node.status);
+  if (state.filter === "model") return node.kind === "model";
+  if (state.filter === "tool") return node.kind === "tool";
+  return node.kind === state.filter;
+}
+
+function trackWidth() {
+  const scroll = $("scroll");
+  const available = Math.max(420, (scroll.clientWidth || 900) - LABEL_W() - 14);
+  return Math.round(available * state.zoom);
+}
+
+function renderRows(trace) {
+  const rows = $("rows");
+  if (!trace) { rows.innerHTML = ""; return; }
+  if (trace.legacy || trace.nodes.length === 0) {
+    rows.innerHTML = `<div class="empty" style="padding:34px;color:#5b6f8c">这次对话没有 span 时间轴。</div>`;
+    $("foot").textContent = "";
+    return;
+  }
+  const total = Math.max(1, trace.totalMs);
+  const tw = trackWidth();
+  document.documentElement.style.setProperty("--track-w", `${tw}px`);
+  const step = niceStep(total / 8);
+  document.documentElement.style.setProperty("--grid", `${(step / total) * tw}px`);
+
+  const ruler = [];
+  for (let t = 0; t < total; t += step) {
+    ruler.push(`<span style="left:${(t / total) * 100}%">${fmtOffset(t)}</span>`);
+  }
+  // 最后一格必须落在总时长上，否则最长的条右端没有刻度可读。
+  ruler.push(`<span class="end" style="left:100%">${fmtOffset(total)}</span>`);
+
+  const shown = trace.nodes.filter(visible);
+  const head = `<div class="row head">
+      <div class="label-col">调用 / 类型</div>
+      <div class="track ticks">${ruler.join("")}</div>
+    </div>`;
+
+  const body = shown.map((node) => {
+    // 轮次行画"本轮 + 子调用"的外包络：turn span 收尾早于最后一个工具结果时，条也要包住它。
+    const bandStart = node.kind === "turn" ? (node.bandStartMs ?? node.startMs) : node.startMs;
+    const bandEnd = node.kind === "turn" ? (node.bandEndMs ?? node.endMs) : node.endMs;
+    const left = ((bandStart - Date.parse(trace.startedAt)) / total) * 100;
+    const width = Math.max(((bandEnd - bandStart) / total) * 100, 0.12);
+    const statusClass = `st-${node.status}`;
+    const isTurn = node.kind === "turn";
+    const indent = 8 + node.depth * 15;
+    const label = isTurn ? `第 ${node.turnIndex ?? "?"} 轮` : node.name;
+    const sub = isTurn ? `${node.payload?.tool_calls ?? 0} 次工具` : (node.derived === "approval" ? "人工等待" : "");
+    // 开始时间与耗时放在左侧标签列的第二行：条形再短再靠右也不会被裁掉或压住文字。
+    const timeLine = `${fmtClock(bandStart)} · ${fmtDuration(bandEnd - bandStart)}${isTurn ? "（区间）" : ""}`;
+    return `<div class="row kind-${node.kind} ${node.status !== "ok" ? `status-${node.status}` : ""} ${state.selected === node.id ? "sel" : ""}" data-id="${esc(node.id)}" title="${esc(node.name)} · ${esc(timeLine)}">
+        <div class="label-col" style="padding-left:${indent}px">
+          <div class="ln1">
+            <span class="dot ${esc(node.status)}"></span>
+            <span class="badge ${node.kind}">${KIND_LABEL[node.kind] || node.kind}</span>
+            <span class="nm">${esc(label)}${sub ? `<span class="sub">${esc(sub)}</span>` : ""}</span>
+          </div>
+          <div class="ln2 mono">${esc(timeLine)}</div>
+        </div>
+        <div class="track">
+          <div class="bar kind-${node.kind} ${statusClass}" style="left:${left}%;width:${width}%"></div>
+        </div>
+      </div>`;
+  }).join("");
+
+  rows.innerHTML = head + body;
+  rows.querySelectorAll(".row[data-id]").forEach((row) => row.addEventListener("click", () => {
+    state.selected = row.dataset.id;
+    rows.querySelectorAll(".row").forEach((item) => item.classList.toggle("sel", item === row));
+    renderDetail(state.trace);
+  }));
+
+  const parts = [
+    `${shown.length} 行（共 ${trace.nodes.length} 个 span）`,
+    `起点 ${new Date(trace.startedAt).toLocaleString("zh-CN", { hour12: false })}`,
+    `总时长 ${fmtDuration(trace.totalMs)}`,
+    "条长 = 该调用实际占用的墙钟时间",
+  ];
+  if (trace.stats.stop) parts.push(`结束码 ${trace.stats.stop}`);
+  if (trace.stats.acceptance) parts.push(`验收 ${trace.stats.acceptance === "passed" ? "通过" : "未通过"}`);
+  $("foot").textContent = parts.join("　·　");
+}
+
+function niceStep(raw) {
+  const exp = Math.floor(Math.log10(Math.max(raw, 1)));
+  const base = Math.pow(10, exp);
+  const candidates = [1, 2, 5, 10].map((m) => m * base);
+  return candidates.find((value) => value >= raw) || candidates[candidates.length - 1];
+}
+
+function renderDetail(trace) {
+  const host = $("detail");
+  if (!trace || !state.selected) {
+    host.innerHTML = `<div class="empty">点击左侧任意一行<br />查看这次调用的开始时间、耗时、参数与结果</div>`;
+    return;
+  }
+  const node = trace.nodes.find((item) => item.id === state.selected);
+  if (!node) { host.innerHTML = `<div class="empty">没有选中调用</div>`; return; }
+  const parent = trace.nodes.find((item) => item.id === node.parentId);
+  const payload = node.payload || {};
+  const absoluteEnd = new Date(node.endMs).toISOString();
+  const common = [
+    ["类型", `${KIND_LABEL[node.kind] || node.kind}${node.derived ? "（来自 approvals 表）" : ""}`],
+    ["状态", `<span class="pill ${esc(node.status)}">${STATUS_LABEL[node.status] || esc(node.status)}</span>`],
+    ["开始时间", `<span class="mono">${fmtClock(node.startMs)}</span> <span style="color:var(--faint)">(+${fmtDuration(node.offsetMs)})</span>`],
+    ["结束时间", `<span class="mono">${fmtClock(node.endMs)}</span> <span style="color:var(--faint)">(+${fmtDuration(node.offsetMs + node.durationMs)})</span>`],
+    ["持续时长", `<b class="mono">${fmtDuration(node.durationMs)}</b>`],
+    ["轮次", node.turnIndex == null ? "—" : `第 ${node.turnIndex} 轮`],
+    ["父调用", parent ? `${KIND_LABEL[parent.kind] || parent.kind} · ${esc(parent.name)}` : "—"],
+  ];
+
+  const sections = [kv(common)];
+
+  if (node.kind === "run") {
+    sections.push(section("会话", kv([
+      ["目标", esc(payload.prompt || "—")],
+      ["任务", esc(payload.task || "—")],
+      ["模型", esc(payload.model || "—")],
+      ["决策器", esc(payload.decider || "—")],
+      ["工作区", `<span class="mono">${esc(payload.workspace || "—")}</span>`],
+      ["结束码", esc(payload.stop || "—")],
+      ["结束原因", esc(payload.reason || "—")],
+      ["验收", payload.acceptance ? `${payload.acceptance === "passed" ? "通过" : "未通过"}` : "—"],
+      ["缺失项", esc(Array.isArray(payload.missing) && payload.missing.length ? payload.missing.join("；") : "无")],
+    ])));
+  } else if (node.kind === "model") {
+    const usage = payload.usage || {};
+    const calls = Array.isArray(payload.tool_call_details) ? payload.tool_call_details : [];
+    sections.push(section("模型", kv([
+      ["模型", esc(payload.model || "—")],
+      ["决策器", esc(payload.decision || "—")],
+      ["输入 tokens", esc(usage.input_tokens ?? "—")],
+      ["输出 tokens", esc(usage.output_tokens ?? "—")],
+      ["总计 tokens", esc(usage.total_tokens ?? "—")],
+      ["成本 (USD)", esc(usage.cost_usd != null ? Number(usage.cost_usd).toFixed(6) : "—")],
+      ["停止原因", esc(payload.stop_reason || "—")],
+    ])));
+    if (payload.text_preview) sections.push(section(`模型输出（${payload.text_chars ?? 0} 字符）`, `<pre>${esc(payload.text_preview)}</pre>`));
+    if (calls.length) {
+      sections.push(section("本轮工具调用", `<pre>${esc(calls.map((call) => `• ${call.name}\n  ${call.args_preview || "（无参数）"}`).join("\n"))}</pre>`));
+    }
+  } else if (node.kind === "tool") {
+    sections.push(section("工具", kv([
+      ["工具名", esc(node.name)],
+      ["治理码", esc(payload.code || "—")],
+      ["是否执行", payload.executed === false ? "否（被门口拦下）" : "是"],
+      ["重试次数", esc(payload.attempts ?? "—")],
+      ["结果长度", payload.result_chars != null ? `${payload.result_chars} 字符` : "—"],
+    ])));
+    if (payload.args_preview) sections.push(section("调用参数", `<pre>${esc(payload.args_preview)}</pre>`));
+    if (payload.args && Object.keys(payload.args).length) sections.push(section("参数原文", `<pre>${esc(JSON.stringify(payload.args, null, 2))}</pre>`));
+    if (payload.result_preview) sections.push(section("结果摘要", `<pre>${esc(payload.result_preview)}</pre>`));
+  } else if (node.kind === "approval") {
+    sections.push(section("人工审批", kv([
+      ["审批单", `<span class="mono">${esc(payload.approval_id || "—")}</span>`],
+      ["工具", esc(payload.tool || node.name)],
+      ["单据状态", esc(payload.approval_status || payload.status || "—")],
+      ["决策人", payload.decided_by
+        ? esc(payload.decided_by)
+        : (payload.approval_status === "denied" || payload.approval_status === "failed")
+          ? "—（系统预检失败，未到人）"
+          : "—"],
+      ["决策时间", esc(fmtIso(payload.decided_at))],
+      ["领取执行", esc(fmtIso(payload.consumed_at))],
+      ["参数摘要", payload.args_digest
+        ? `<span class="mono" title="${esc(String(payload.args_digest))}">${esc(String(payload.args_digest).slice(0, 16))}…</span>`
+        : "—"],
+    ])));
+  } else if (node.kind === "turn") {
+    sections.push(section("本轮", kv([
+      ["轮次", `第 ${node.turnIndex ?? "?"} 轮`],
+      ["工具分布", esc(payload.tools ? JSON.stringify(payload.tools) : "无")],
+    ])));
+  }
+
+  if (node.error) {
+    sections.push(`<div class="errbox"><b>${esc(node.error.code || "ERROR")}</b><br />${esc(node.error.message || "")}</div>`);
+  }
+  sections.push(`<details><summary>原始 payload（JSON）</summary><pre>${esc(JSON.stringify(payload, null, 2))}</pre></details>`);
+
+  host.innerHTML = `
+    <div class="dhead">
+      <h2>${esc(node.name)}</h2>
+      <div class="dmeta">
+        <span class="badge ${node.kind}">${KIND_LABEL[node.kind] || node.kind}</span>
+        <span class="pill ${esc(node.status)}">${STATUS_LABEL[node.status] || esc(node.status)}</span>
+        <span class="mono">${fmtDuration(node.durationMs)}</span>
+        <span class="mono" style="color:var(--faint)">${fmtIso(absoluteEnd)}</span>
+      </div>
+    </div>
+    <div class="body">${sections.join("")}</div>`;
+}
+
+function kv(pairs) {
+  return `<div class="kv">${pairs.map(([k, v]) => `<div class="k">${k}</div><div class="v">${v}</div>`).join("")}</div>`;
+}
+function section(title, html) {
+  return `<div class="sec"><h3>${title}</h3>${html}</div>`;
+}
+
+boot().catch((error) => {
+  $("rows").innerHTML = `<div class="empty" style="padding:30px;color:#f87171">加载失败：${esc(error.message)}</div>`;
+});
+</script>
+</body>
+</html>

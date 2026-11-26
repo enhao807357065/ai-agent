@@ -1,0 +1,25 @@
+# Node / TypeScript build output
+a/node_modules/
+/node_modules/
+/dist/
+
+# Python virtual environments and bytecode
+/hitl/.venv/
+**/__pycache__/
+*.py[cod]
+/.pytest_cache/
+
+# Runtime SQLite data and generated execution artifacts
+/data/
+/hitl/*.db
+/samples/1_login_demo/artifacts/
+
+# Local analysis caches
+/.codebase-memory/
+
+# Report / visualization HTML is generated locally, not source deliverables
+/*.html
+/docs/*.html
+
+# OS metadata
+.DS_Store

@@ -1,0 +1,69 @@
+# 离线决策脚本：任务二"让失败的会话到期用例变绿"。
+# 顺序是受治理的红—绿循环：只在 tests/generated/ 新增一条边界测试 →
+# 用该测试取得红色基线 → 只改源文件 → 全量复跑 → 查看源文件差异。
+# 打补丁那一步要人工审批；补丁的原文写在这里，等于"改什么"在开工前就摆给人看。
+steps:
+  - text: "先只在 tests/generated/ 写一条同日到期边界测试；已有 tests 一行不动。"
+    tool_calls:
+      - name: write_file
+        args:
+          path: tests/generated/session-expiry-boundary.test.ts
+          content: |-
+            import assert from "node:assert/strict";
+            import test from "node:test";
+
+            import { isSessionExpired } from "../../src/auth/session-policy.js";
+
+            test("同日到期的精确边界视为已过期", () => {
+              const session = { expiresAt: "2026-09-11T23:59:59.999Z" };
+              const now = new Date("2026-09-11T23:59:59.999Z");
+
+              assert.equal(isSessionExpired(session, now), true);
+            });
+
+  - text: "先只跑新增的边界测试拿红色基线；失败必须来自已知的按日比较缺陷。"
+    tool_calls:
+      - name: run_test
+        args:
+          test_file: tests/generated/session-expiry-boundary.test.ts
+
+  - text: "边界测试在同一天的精确到期时刻失败；读取新增测试和实现，确认缺陷范围。"
+    tool_calls:
+      - name: read_file
+        args:
+          path: tests/generated/session-expiry-boundary.test.ts
+      - name: read_file
+        args:
+          path: src/auth/session-policy.ts
+
+  - text: "实现只比到「哪天」，没比到「哪一刻」：只补丁源文件，按毫秒时刻比较。"
+    tool_calls:
+      - name: apply_patch
+        args:
+          path: src/auth/session-policy.ts
+          edits:
+            # oldText 要与文件逐字一致，所以从函数签名那一行起写：
+            # 块标量按第一行的缩进定基线，后面两行多出来的两个空格才会被保留下来。
+            - oldText: |-
+                export function isSessionExpired(session: ExpiringSession, now: Date): boolean {
+                  const expiresOn = session.expiresAt.slice(0, 10);
+                  const currentDay = now.toISOString().slice(0, 10);
+                  return expiresOn < currentDay;
+                }
+              newText: |-
+                export function isSessionExpired(session: ExpiringSession, now: Date): boolean {
+                  return new Date(session.expiresAt).getTime() <= now.getTime();
+                }
+
+  - text: "源文件补丁已按批准的原文写入；现在跑完整套件，覆盖新增边界测试与既有集成测试。"
+    tool_calls:
+      - name: run_test
+        args: {}
+
+  - text: "全量复跑通过；最后只查看源文件差异，确认补丁没有改动既有测试。"
+    tool_calls:
+      - name: git_diff
+        args:
+          path: src/auth/session-policy.ts
+
+  - text: "新增的 tests/generated/session-expiry-boundary.test.ts 已先证明同日精确到期的缺陷；随后只修改 src/auth/session-policy.ts，完整套件已通过，既有测试未改动。"

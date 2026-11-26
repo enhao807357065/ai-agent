@@ -54,3 +54,10 @@ htmlcov/
 /week03-langgraph/demos/**/visualizations/
 
 samples/*
+# Node dependencies
+node_modules/
+
+# Local runtime databases and generated reports
+/reports/
+/week03-langgraph/project3/v2/data/
+/week03-langgraph/project3/v2/*.html

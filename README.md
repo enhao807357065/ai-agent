@@ -2,6 +2,15 @@
 
 从零构建 AI Agent 的实践项目，覆盖 LLM 调用、Agent 循环、流式服务、结构化输出、持久化等核心能力。
 
+## 第五章作业：Codebase Agent 与对话轨迹图（Week 05）
+
+> 代码：[`week05-codebase-agent-homework/`](week05-codebase-agent-homework/)，说明：[`README.md`](week05-codebase-agent-homework/README.md)。
+>
+> 真模型驱动的仓库 Agent：工具调用走契约、策略、预算与审计，写操作按策略审批，全过程落 `trace_spans`。
+>
+> - **重点 · 验收 A：真模型 + 自动审批** —— [命令与实测账本](week05-codebase-agent-homework/README.md#acceptance-a)：8 轮、20 次工具、13.8 s、`COMPLETED` / `passed`。
+> - **重点 · 对话轨迹图** —— [启动与读图](week05-codebase-agent-homework/README.md#trace-ui)：一次对话的甘特时间轴，条长即真实耗时。
+
 ## 第四章作业：项目长期记忆与局部同步 RAG（Week 04）
 
 > 作业代码位于 [`week04-homework/`](week04-homework/)，完整说明见：[`week04-homework/homework.md`](week04-homework/homework.md)。
